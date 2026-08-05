@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vidopt"
+version = "1.0.0"
+description = "Scene-adaptive video compression with learned encoder parameters"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Pinned for reproducible offline installs. On a connected machine run
+# `pip download -d vendor/wheelhouse .` then `python scripts/setup.py --skip-ffmpeg`
+# offline (setup uses the wheelhouse with --no-index when present).
+dependencies = [
+    "numpy==2.1.3",
+    "scipy==1.14.1",
+    "scikit-learn==1.5.2",
+    "joblib==1.4.2",
+    "opencv-python-headless==4.10.0.84",
+    "scenedetect==0.6.5",
+    "PyYAML==6.0.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.3"]
+
+[project.scripts]
+vidopt = "vidopt.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The YAML configs ship INSIDE the package, so a wheel install finds them without
+# assuming the repository layout exists at run time.
+[tool.setuptools.package-data]
+vidopt = ["configs/*.yaml"]
+
+[tool.ruff]
+line-length = 90
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+ignore = ["E203"]
+
+[tool.black]
+line-length = 90
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["ignore::DeprecationWarning"]

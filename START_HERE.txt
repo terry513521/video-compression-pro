@@ -1,0 +1,33 @@
+vidopt — ready-to-run offline package
+====================================
+
+Extract this zip anywhere. Then:
+
+  vidopt.bat doctor
+  vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4
+  vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libx265 --verify
+
+Defaults: encoder=libx265, cpu-workers=4, gpu-workers=0
+GPU example: --encoder hevc_nvenc --gpu-workers 1
+
+Bundled repair kit (no network needed):
+  vendor\installers\python-3.11.9-embed-amd64.zip
+  vendor\installers\python-3.11.9-amd64.exe
+  vendor\installers\get-pip.py
+  vendor\wheelhouse\*.whl
+  vendor\ffmpeg\bin\ffmpeg.exe + ffprobe.exe
+
+If the environment is damaged: run install.bat
+See REPAIR.txt
+
+Put videos in video\corpus\
+Outputs: out\
+Models after training: models\
+
+Bundled:
+  vendor\python              portable Python 3.11 + all libraries
+  vendor\ffmpeg\bin          ffmpeg + ffprobe (libvmaf)
+  vendor\installers          official Python 3.11 installer .exe
+  vendor\wheelhouse          pip wheels (repair via install.bat)
+
+Full guide: OFFLINE_GUIDE.md

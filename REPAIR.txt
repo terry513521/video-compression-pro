@@ -1,0 +1,71 @@
+Repair guide — OFFLINE only
+===========================
+
+You are offline. The environment may be damaged. Repair using ONLY the installable
+pieces that shipped inside this package (no internet).
+
+What you need (must still be present)
+-------------------------------------
+  vendor\installers\python-3.11.9-embed-amd64.zip   portable Python zip
+  vendor\installers\python-3.11.9-amd64.exe         official Python installer
+  vendor\installers\get-pip.py
+  vendor\wheelhouse\*.whl                           all Python libraries
+  vendor\ffmpeg\bin\ffmpeg.exe
+  vendor\ffmpeg\bin\ffprobe.exe
+  src\vidopt\                                       application source
+  install.bat
+  vidopt.bat
+
+One-command repair
+------------------
+  1. Close any running vidopt / ffmpeg / python windows.
+  2. From this folder:
+
+       install.bat
+
+  3. Check:
+
+       vidopt.bat doctor
+
+What install.bat does (no network)
+---------------------------------
+  - If vendor\python\python.exe is missing or broken:
+      rebuild it from vendor\installers\python-3.11.9-embed-amd64.zip
+      (fallback: silent install of python-3.11.9-amd64.exe into vendor\python)
+  - Install pip from get-pip.py + vendor\wheelhouse
+  - pip install --no-index all libraries from vendor\wheelhouse
+  - Copy src\vidopt into vendor\python\Lib\site-packages\
+  - Run vidopt doctor using vendor\ffmpeg\bin
+
+Symptom → fix
+-------------
+  ImportError / ModuleNotFoundError     install.bat
+  Python deleted / won't start          install.bat  (rebuilds from installers)
+  ffmpeg / libvmaf / encode fails       restore vendor\ffmpeg\bin\*.exe
+                                        then install.bat
+  no model for encoder ...              restore models\ or re-train
+                                        (same --encoder as compress)
+  WinError 32 / file in use             Task Manager: end ffmpeg.exe / python.exe
+                                        then install.bat
+  wheelhouse or installers missing      package incomplete — get a fresh zip
+
+Soft reset (Python binary OK, libraries broken)
+-----------------------------------------------
+  rmdir /s /q vendor\python\Lib\site-packages\vidopt
+  install.bat
+  vidopt.bat doctor
+
+Hard reset (wipe and rebuild Python tree)
+-----------------------------------------
+  rmdir /s /q vendor\python
+  install.bat
+  vidopt.bat doctor
+
+After repair — normal use
+-------------------------
+  vidopt.bat doctor
+  vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4
+  vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libx265 --verify
+
+Full guide: OFFLINE_GUIDE.md  (section "Repair")
+Also: README.md  (section "Repair (offline — damaged environment)")

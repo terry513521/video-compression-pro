@@ -1,0 +1,153 @@
+# vidopt — default configuration
+#
+# Every tunable in the pipeline lives here. Overlay a second file with `--config`,
+# or override single keys with `--set section.key=value`.
+#
+# Unknown keys are an error, not a silent no-op, so typos surface immediately.
+
+log_level: INFO
+
+ffmpeg:
+  # Directory holding ffmpeg/ffprobe. null => search, in this order:
+  #   VIDOPT_FFMPEG_DIR -> vendor/ffmpeg/bin -> PATH
+  # The vendored build is strongly preferred: most distribution ffmpeg packages are
+  # built without libvmaf, and then quality cannot be measured at all.
+  bin_dir: null
+  # -threads for encodes. 0 lets ffmpeg choose. Leave at 0 unless you are running many
+  # concurrent encodes and want to bound each one.
+  threads: 0
+  loglevel: error
+
+segment:
+  # 'adaptive' handles gradual transitions better than 'content'; both are PySceneDetect.
+  detector: adaptive
+  adaptive_threshold: 3.0
+  content_threshold: 27.0
+
+  # Detection runs on a downscaled proxy — it does not need full resolution, and
+  # building the proxy costs far less than decoding 4K/8K through the detector.
+  # 0 disables the proxy.
+  proxy_height: 360
+
+  # Duration guards. Sub-second segments encode inefficiently (keyframe overhead
+  # dominates) and add noise to the training labels; unbounded segments defeat
+  # parallelism and blur content statistics.
+  min_segment_seconds: 2.0
+  max_segment_seconds: 15.0
+
+  # Used only when the detector finds no cuts at all (a single continuous shot).
+  fallback_segment_seconds: 6.0
+
+  # Intermediate container. Matroska tolerates stream-copied cuts best.
+  container: mkv
+
+features:
+  # Frames sampled per segment. More frames = steadier statistics, slower analysis.
+  max_frames: 96
+  # Frames are downscaled to this width before analysis. Texture and motion statistics
+  # are resolution-sensitive, so this MUST match between dev and production or the model
+  # learns "resolution" instead of "complexity". Changing it invalidates trained models.
+  analysis_width: 480
+  canny_low: 100
+  canny_high: 200
+
+encoder:
+  # Models are encoder-specific: a CRF value only means something for one encoder.
+  # Changing this requires re-running dev mode.
+  #   CPU: libx265, libx264, libsvtav1
+  #   GPU: hevc_nvenc, av1_nvenc, h264_nvenc
+  name: libx265
+  preset: medium
+  # Keyframe interval in seconds. Also fixes the GOP so independently encoded segments
+  # concatenate without re-encoding.
+  keyint_seconds: 2.0
+  # 'auto' keeps the source pixel format when the encoder supports it, so 10-bit and
+  # 4:4:4 input are not silently downconverted. Set an explicit name (yuv420p) only if
+  # you deliberately want everything normalised to 8-bit 4:2:0.
+  pix_fmt: auto
+  extra_args: []
+
+vmaf:
+  # 'vmaf_v0.6.1neg' resists sharpening/contrast tricks that inflate standard VMAF
+  # without improving fidelity. Use 'vmaf_v0.6.1' for the classic model.
+  model: vmaf_v0.6.1neg
+  # Frame subsampling during the search. 2 roughly halves cost for well under
+  # 0.5 VMAF of noise on 30s clips.
+  n_subsample_search: 2
+  # Never subsample when reporting a final number.
+  n_subsample_verify: 1
+  n_threads: 4
+  # Use libvmaf_cuda when the build provides it. Falls back to CPU automatically.
+  use_cuda: true
+  # 'harmonic_mean' punishes bad frames, which is the correct pooling for a quality
+  # floor. 'mean' is available for comparison.
+  pool: harmonic_mean
+
+search:
+  targets: [85.0, 89.0, 93.0]
+
+  # 'sobol' is a low-discrepancy sequence: at these budgets (tens of trials) it covers
+  # the space far more evenly than uniform 'random'. 'grid' is also available.
+  sampler: sobol
+
+  # Stage A: exploration trials per segment, shared across all targets.
+  n_explore: 12
+  # Stage B: how many of the best AQ settings get a CRF bisection, per target.
+  n_refine_configs: 2
+  max_bisect_iters: 6
+  # Bisection stops once the CRF bracket is narrower than this.
+  crf_tolerance: 0.5
+
+  seed: 20240817
+  # SQLite trial cache. Makes re-runs and extra targets nearly free. Rarely worth off.
+  cache: true
+
+model:
+  # 'hgb' (HistGradientBoosting) supports the quantile loss below; 'rf' does not.
+  estimator: hgb
+
+  # THE important knob. The objective scores zero below target-5, so predicting a CRF
+  # that is too high risks losing everything while too low only wastes bits. Fitting the
+  # CRF head with quantile loss below 0.5 makes the model conservative by construction.
+  #
+  # Margin is not optional, for two compounding reasons:
+  #   1. The search returns the HIGHEST CRF that still meets the target, so the training
+  #      labels sit right on the boundary with essentially no margin of their own.
+  #   2. Whole-video VMAF is the frame-weighted HARMONIC mean of the segments, which
+  #      penalises a segment that lands low more than an equally-sized overshoot helps.
+  #      So even a perfectly unbiased model lands the finished video below the target.
+  #
+  # Measured on the 6-clip 720p corpus in runs/full (see README "Validation"):
+  #   q=0.35  ->  +0.19 CRF margin  ->  held-out video missed all three targets by ~2 VMAF
+  #   q=0.15  ->  +1.03 CRF margin  ->  held-out video met 85 and 93, missed 89 by 0.6
+  # Calibrate for your own corpus: raise it if you are leaving compression on the table,
+  # lower it if `--verify` reports MISSED.
+  #   0.50  unbiased, maximum compression, reliably misses the target
+  #   0.15  default, roughly +1 CRF of margin
+  #   0.10  cautious, for content unlike the training corpus
+  crf_quantile: 0.15
+
+  max_iter: 300
+  learning_rate: 0.06
+  max_depth: 4
+  min_samples_leaf: 4
+  # Refuse to fit a model on fewer labelled segments than this. Lower it only for
+  # plumbing checks (see configs/quick.yaml); production needs a real corpus.
+  min_training_rows: 8
+  # Validation split is by SOURCE VIDEO, not at random: segments from the same source
+  # share content, and a random split would leak near-duplicates into validation.
+  val_fraction: 0.25
+  seed: 20240817
+
+jobs:
+  # Concurrent CPU encodes. Raise for more throughput; lower on 4K to avoid OOM.
+  # 0 => auto, sized from core count and ffmpeg_threads_per_job.
+  cpu_workers: 4
+  # Concurrent GPU encodes. 0 = CPU-only (default). Raise to match NVENC devices.
+  gpu_workers: 0
+  ffmpeg_threads_per_job: 2
+
+paths:
+  work_dir: runs/current
+  cache_db: runs/cache/trials.sqlite
+  models_dir: models

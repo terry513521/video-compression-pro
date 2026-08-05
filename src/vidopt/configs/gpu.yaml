@@ -1,0 +1,26 @@
+# GPU overlay: a few GPUs, many CPUs — the stated deployment target.
+#
+#   vidopt dev ../video/4k --config configs/gpu.yaml --set jobs.gpu_workers=3
+#
+# NVENC encodes on the GPU and libvmaf_cuda measures on the GPU, so the search loop
+# runs almost entirely on the device. Set jobs.gpu_workers to roughly the number of
+# GPUs: NVENC limits concurrent encode sessions per device, and exceeding it fails
+# the encode rather than queueing.
+
+encoder:
+  name: hevc_nvenc
+  preset: p5
+
+vmaf:
+  use_cuda: true
+  n_subsample_search: 1   # CUDA VMAF is fast enough to score every frame
+
+jobs:
+  cpu_workers: 0
+  gpu_workers: 1          # raise to the number of GPUs available
+  ffmpeg_threads_per_job: 2
+
+search:
+  # GPU trials are cheap, so explore more of the AQ space.
+  n_explore: 20
+  n_refine_configs: 3

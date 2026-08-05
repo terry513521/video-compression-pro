@@ -1,0 +1,20 @@
+# CPU-only overlay: many cores, no GPU.
+#
+#   vidopt dev ../video/4k --config configs/cpu.yaml
+#
+# libx265 is the default choice here: it exposes aq-mode (0-4) and aq-strength as
+# genuine floats, which is the richest version of the parameter space the task names.
+# Swap to libsvtav1 for better compression at the cost of a coarser AQ knob.
+
+encoder:
+  name: libx265
+  preset: medium
+
+vmaf:
+  use_cuda: false
+  n_threads: 4
+
+jobs:
+  cpu_workers: 4
+  gpu_workers: 0
+  ffmpeg_threads_per_job: 2

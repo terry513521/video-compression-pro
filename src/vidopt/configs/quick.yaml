@@ -1,0 +1,35 @@
+# Fast overlay for smoke tests and CI — deliberately low fidelity.
+#
+#   vidopt dev ../video/4k --config configs/quick.yaml --limit 2
+#
+# Not for producing models you intend to deploy: the search budget is far too small to
+# characterise the AQ space, and the segments are short.
+
+encoder:
+  preset: veryfast
+
+features:
+  max_frames: 24
+  analysis_width: 320
+
+segment:
+  min_segment_seconds: 2.0
+  max_segment_seconds: 8.0
+  proxy_height: 240
+
+vmaf:
+  n_subsample_search: 5
+  n_subsample_verify: 2
+
+search:
+  n_explore: 6
+  n_refine_configs: 1
+  max_bisect_iters: 3
+  crf_tolerance: 1.0
+
+model:
+  min_samples_leaf: 2
+  max_iter: 120
+  # Smoke corpora are small; production still uses the default of 8.
+  min_training_rows: 4
+  val_fraction: 0.25
