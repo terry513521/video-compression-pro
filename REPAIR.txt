@@ -1,5 +1,12 @@
-Repair guide — OFFLINE only
-===========================
+Linux (CPU) repair
+==================
+  ./install.sh
+  ./vidopt.sh doctor --config cpu
+  copy videos into video/corpus/     if the corpus folder is empty
+See LINUX.md
+
+Windows repair — OFFLINE only
+=============================
 
 You are offline. The environment may be damaged. Repair using ONLY the installable
 pieces that shipped inside this package (no internet).

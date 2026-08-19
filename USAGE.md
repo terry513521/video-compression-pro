@@ -4,6 +4,7 @@ Step-by-step instructions for installing the environment, running dev mode, and 
 production mode.
 
 - [README.md](README.md) — overview and reference
+- [LINUX.md](LINUX.md) — Linux CPU install, copy corpus, train, compress
 - [DESIGN.md](DESIGN.md) — how it works and why
 - [REFERENCE_ANALYSIS.md](REFERENCE_ANALYSIS.md) — analysis of the reference projects
 
@@ -24,7 +25,11 @@ identical across platforms.
    - [1.6 Where things live](#16-where-things-live)
    - [1.7 Windows notes](#17-windows-notes)
 2. [Dev mode](#2-dev-mode)
+   - [2.4 Search algorithms](#24-search-algorithms)
+   - [2.9 Offline training workflow](#29-offline-training-workflow)
+   - [2.10 Optional: algorithm matrix](#210-optional-algorithm-matrix)
 3. [Production mode](#3-production-mode)
+   - [3.6 Deploying trained models (offline production)](#36-deploying-trained-models-offline-production)
 4. [Tuning](#4-tuning)
 5. [Operations](#5-operations)
 6. [Command reference](#6-command-reference)
@@ -79,6 +84,15 @@ Then run the setup script:
 
 ```bash
 python scripts/setup.py
+```
+
+On Linux you can do the same with one script (creates `.venv`, fetches libvmaf ffmpeg,
+runs `vidopt doctor --config cpu`):
+
+```bash
+./install.sh
+./vidopt.sh doctor --config cpu
+# copy training videos into video/corpus/  (USB, disk, another machine)
 ```
 
 It downloads an ffmpeg build for your platform into `vendor/ffmpeg/`, checks that it has
@@ -237,13 +251,33 @@ measurement:
 
 > Which `(crf, aq-mode, aq-strength)` gives the smallest file that still reaches this VMAF?
 
+How those three knobs are searched is `search.strategy` (default **`aq_then_crf`**). See
+[§2.4 Search algorithms](#24-search-algorithms).
+
 ## 2.2 Preparing a corpus
 
 The corpus should **look like what you will compress in production**. This matters more
 than corpus size: the model interpolates well and extrapolates badly, so if you will
 compress 4K, train on 4K.
 
-- Point it at files, directories, or both. Directories recurse.
+**Copy** the videos onto the machine (USB, external disk, or another folder). There is
+no network step:
+
+```bash
+# Linux / macOS
+mkdir -p video/corpus
+cp /media/usb/*.mp4 video/corpus/
+# or a whole tree:
+cp -a /path/to/your_videos/. video/corpus/
+```
+
+```powershell
+# Windows
+New-Item -ItemType Directory -Force -Path video\corpus
+Copy-Item D:\my_videos\*.mp4 video\corpus\ -Force
+```
+
+- Point `vidopt dev` at files, directories, or both. Directories recurse.
 - Recognised: `.mp4 .mkv .mov .webm .y4m .avi .m4v .ts`
 - Aim for **10+ source videos** spanning your real content: high and low motion, grain,
   flat animation, dark scenes, screen content.
@@ -268,10 +302,159 @@ Useful options:
 |---|---|
 | `--limit N` | Use at most N source videos |
 | `--no-train` | Build the dataset, skip training (train later with `vidopt train`) |
-| `--set search.n_explore=20` | More exploration per segment: better models, slower |
+| `--set search.strategy=coordinate` | AQ neighbour walk after the AQ screen |
+| `--set search.strategy=bayes` | Gaussian-process Bayesian optimisation |
+| `--set search.strategy=tpe` | Tree-structured Parzen Estimator |
+| `--set search.strategy=cmaes` | CMA-style evolution strategy |
+| `--set search.strategy=sample` | 3-D design (`search.sampler=sobol\|lhs\|halton\|random\|grid`) |
+| `--set search.crf_solver=brent` | Inverse-quadratic CRF solve instead of secant-bisection |
+| `--set search.n_explore=20` | Larger stage-A budget / cap |
 | `--set search.targets='[85,89,93]'` | Which VMAF targets to learn |
 
-## 2.4 Reading the output
+## 2.4 Search algorithms
+
+Each trial is an encode plus a VMAF measurement. Search runs only in `vidopt dev`.
+Production (`vidopt compress`) never re-searches: it predicts from the trained model.
+
+CRF is 1-D: **VMAF falls as CRF rises**, so once AQ is fixed the highest feasible CRF
+can be found with a 1-D solver. AQ (`aq_mode`, `aq_strength`) is a small discrete set
+(for example 8 integer pairs on `libsvtav1`). Every algorithm below is a different way
+to spend the stage-A budget on those three knobs, then the same 1-D CRF solve still
+runs on the best AQ settings.
+
+Two stages, shared by every VMAF target:
+
+1. **Stage A (explore)** — propose `(crf, aq_mode, aq_strength)` points until
+   `search.n_explore` (default 12). Structured strategies may spend about 2× that so
+   every AQ can be screened.
+2. **Stage B (refine)** — at the best AQ setting(s), run `search.crf_solver` until the
+   CRF bracket is narrower than `search.crf_tolerance` (default 0.5).
+
+Trials are cached in SQLite (`runs/cache/trials.sqlite`), so `--resume` and extra VMAF
+targets reuse encodes.
+
+### Strategies (`search.strategy`)
+
+| Value | Kind | What it does |
+|---|---|---|
+| **`aq_then_crf`** (default) | Structured | Enumerate every AQ pair, screen each at a few CRFs, then 1-D CRF-solve the best |
+| **`coordinate`** | Structured | Same AQ screen, then walk 4-neighbours (mode ±1, strength ±1) and re-solve CRF |
+| **`sample`** | Space-filling | Draw `n_explore` points in 3-D with `search.sampler`, then CRF-solve the best AQ |
+| **`bayes`** | Model-based | Initial design, then a Gaussian process proposes points that look both feasible and compressible |
+| **`tpe`** | Model-based | Tree-structured Parzen Estimator: sample where good trials were denser than bad ones |
+| **`cmaes`** | Evolutionary | Diagonal CMA-style evolution strategy on the unit cube |
+
+**`aq_then_crf`.** Uses the structure of the problem. AQ is cheap to enumerate (8 pairs
+on SVT-AV1, a small float grid on x265). Each pair is probed at `search.n_screen_crfs`
+CRFs (default 2). The `search.n_refine_configs` best AQ settings (default 2) then get a
+full 1-D CRF solve. This is the right default: it does not waste encodes on a 3-D
+random walk when AQ is discrete and CRF is monotone.
+
+**`coordinate`.** Same screen, then a hill-climb on the AQ grid. From the current best
+AQ it tries the four neighbours, re-solves CRF at each, and keeps walking for up to
+`search.max_coordinate_rounds` (default 4) rounds. Use this when neighbouring AQ
+settings interact (typical on x265's float `aq-strength`).
+
+**`sample`.** Ignores AQ structure and covers the 3-D cube with a space-filling design
+(`search.sampler`). Then the same CRF solve runs on the best AQ seen. Useful as a
+baseline, or when you want a design that is independent of the AQ grid.
+
+**`bayes`.** Fits a Gaussian process (Matern kernel) to VMAF vs. the unit-cube
+parameters after an initial design. The next trial maximises
+`P(VMAF ≥ target) × normalised CRF + 0.15·σ` — high CRF (smaller files) among points
+the model thinks will still hit the target, with a small bonus for uncertainty. The
+initial design size is `search.n_init` (0 means `max(4, n_explore/2)`). The GP is
+sklearn; if a fit fails, search keeps the trials so far and stops proposing. Adaptive
+fitness during explore uses the **first** `search.targets` value; stage B still
+refines every target.
+
+**`tpe`.** Bergstra's Tree-structured Parzen Estimator. Rank trials by compression
+score, split into a good set (top 25%) and a bad set, fit a diagonal Gaussian to each
+in the unit cube, and pick the candidate that maximises `log l(x) − log g(x)` (density
+under good vs. bad). Same initial design as `bayes`. Tends to exploit clusters of
+good AQ/CRF combinations without assuming VMAF is a smooth GP.
+
+**`cmaes`.** A small diagonal CMA-ES: λ=4 offspring, μ=2 parents, log weights, mean
+and per-axis step sizes updated each generation. Samples on the unit cube, then maps
+to `(crf, AQ)`. Cheap sequential search when you want an evolutionary method rather
+than a surrogate model. Initial design is capped at 4 points so most of the budget
+goes to the evolution loop.
+
+### Samplers (`search.sampler`)
+
+Used as the whole of stage A when `strategy=sample`, and as the **initial design**
+(and candidate pool) for `bayes` / `tpe` / `cmaes`. All map `[0,1)³` onto
+`(crf, aq_mode, aq_strength)`.
+
+| Value | What it does |
+|---|---|
+| **`sobol`** (default) | Scrambled Sobol sequence. Low discrepancy; good default at tens of trials |
+| **`lhs`** | Latin hypercube: one sample per stratum on each axis, then scrambled |
+| **`halton`** | Scrambled Halton sequence. Another low-discrepancy construction; similar cover to Sobol |
+| **`random`** | Uniform random. Baseline for comparing QMC methods |
+| **`grid`** | Regular lattice sized to ≈ `n` points. Deterministic (`search.seed` is ignored) |
+
+At the budgets that matter here (tens of encodes), Sobol / LHS / Halton cover the cube
+more evenly than uniform random. `grid` is useful when you want a repeatable lattice
+rather than a sequence.
+
+### CRF solvers (`search.crf_solver`)
+
+Stage B, and the CRF re-solve inside `coordinate`. All search for the **highest CRF**
+that still meets the VMAF target at fixed AQ. They stop when the bracket is narrower
+than `search.crf_tolerance` or after `search.max_bisect_iters` (default 6).
+
+| Value | What it does |
+|---|---|
+| **`bisect`** (default) | Secant step using the two bracket endpoints, clamped into the open interval. Falls back to the midpoint if VMAF is not monotone in the bracket |
+| **`brent`** | Inverse-quadratic interpolation through the last three (CRF, VMAF) points, then the same clamp. Can need fewer encodes when VMAF vs. CRF is smooth |
+| **`golden`** | Golden-section split of the bracket (`1/φ`). No VMAF interpolation; slowest to shrink the interval, most robust if the curve is noisy |
+
+### When to use which
+
+| Goal | Setting |
+|---|---|
+| Production training (recommended) | `strategy=aq_then_crf` (default), `crf_solver=bisect` |
+| AQ settings interact (x265 float strength) | `strategy=coordinate` |
+| Compare against a 3-D design | `strategy=sample` plus `sampler=sobol` or `lhs` |
+| Surrogate model over the cube | `strategy=bayes` (optionally `sampler=lhs`, `n_init=6`) |
+| Density-ratio search, no GP | `strategy=tpe` |
+| Evolution strategy | `strategy=cmaes` |
+| Fewer CRF encodes when VMAF is smooth | `crf_solver=brent` |
+| Noisy VMAF (very short segments) | `crf_solver=golden` |
+
+### Examples
+
+```bash
+# Default — enumerate AQ, then secant-bisection on CRF
+vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0
+
+# Neighbour walk after the AQ screen
+vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+  --set search.strategy=coordinate
+
+# 3-D Halton design
+vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+  --set search.strategy=sample --set search.sampler=halton
+
+# Bayesian optimisation with a Latin-hypercube start, Brent CRF solve
+vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+  --set search.strategy=bayes --set search.sampler=lhs --set search.crf_solver=brent
+
+# TPE with a larger initial design
+vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+  --set search.strategy=tpe --set search.n_init=6
+
+# CMA-ES
+vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+  --set search.strategy=cmaes
+```
+
+Changing `search.strategy`, `search.sampler`, or `search.crf_solver` needs a new
+`vidopt dev` (or `--resume` on an unfinished run). `vidopt train` only re-fits the
+model on existing labels.
+
+## 2.5 Reading the output
 
 ```
 stage 1/4: 36 segment(s) from 6 source(s)
@@ -294,7 +477,7 @@ very high-motion content). They are excluded from training rather than teaching 
 to aim at something unreachable. A few percent is normal; 30 % means the target is too
 high for your encoder/preset.
 
-## 2.5 Artifacts
+## 2.6 Artifacts
 
 ```
 runs/current/dataset.csv        one row per (segment, target) — inspect this
@@ -303,16 +486,23 @@ runs/cache/trials.sqlite        every encode+measure result
 models/<encoder>/target_<T>/    the trained bundles
 ```
 
-## 2.6 Interrupting and resuming
+## 2.7 Interrupting and resuming
 
-Safe to interrupt with Ctrl-C. Every trial is cached by content hash, so re-running skips
-everything already measured:
+Safe to interrupt with Ctrl-C. Individual encode+VMAF trials are cached in
+`runs/cache/trials.sqlite`. Finished segments are checkpointed in
+`runs/current/search_records.jsonl`.
+
+Continue the same work directory with `--resume` — it reuses existing scene cuts and
+skips segments that already completed:
 
 ```bash
-vidopt dev path/to/corpus --config cpu     # same command; resumes
+vidopt dev path/to/corpus --config cpu --resume
 ```
 
-## 2.7 Re-training without re-searching
+Without `--resume`, search runs again for every segment (cached trials still skip
+re-encoding). Use `--resume` after a crash or Ctrl-C.
+
+## 2.8 Re-training without re-searching
 
 The search is the expensive part and is already saved. To change a model setting:
 
@@ -321,6 +511,121 @@ vidopt train runs/current/dataset.csv --set model.crf_quantile=0.10
 ```
 
 Takes seconds.
+
+## 2.9 Offline training workflow
+
+Training is designed to run **without network access** after the environment is installed.
+This is the recommended path for a production deployment — one encoder, one search
+algorithm (default `aq_then_crf`), and the VMAF target(s) you will compress with.
+
+### Phase 1 — Install once (online or air-gapped)
+
+**Linux:** `./install.sh` (see [LINUX.md](LINUX.md)).
+
+**Windows offline zip:** extract the production package; run `install.bat` only if
+repair is needed (see [OFFLINE_GUIDE.md](OFFLINE_GUIDE.md)).
+
+**Air-gapped from source:** copy the whole project including `vendor/wheelhouse/` and
+`vendor/ffmpeg/`, then `python scripts/setup.py --skip-ffmpeg` on the offline machine
+(see [§1.5](#15-offline--air-gapped-machines)).
+
+### Phase 2 — Copy the corpus (offline)
+
+Copy videos onto the training machine (USB, disk, rsync). They must **look like production
+content** — same resolutions, motion types, grain, animation vs live action. Put them in
+`video/corpus/` (or any path you pass to `vidopt dev`).
+
+### Phase 3 — Train (offline, hours)
+
+Pick **one encoder** and train with the default search unless you have a reason to change
+it (see [§2.4](#24-search-algorithms)):
+
+```bash
+# Linux — libsvtav1, VMAF 89 only, resume-safe
+./vidopt.sh dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+  --set search.targets='[89]' --resume
+
+# Windows offline
+vidopt.bat dev video\corpus --config cpu --encoder libx265 --cpu-workers 4 `
+  --set search.targets=[89] --set paths.work_dir=runs/production --resume
+```
+
+What you get:
+
+```
+models/<encoder>/target_89/
+  metadata.json       metrics, feature ranges, training sources
+  crf.joblib          CRF regression head
+  aq_mode.joblib      AQ mode classifier
+  aq_strength.joblib  AQ strength regression head
+runs/<work_dir>/dataset.csv
+runs/cache/trials.sqlite   encode+VMAF cache (safe to keep; speeds re-runs)
+```
+
+**Interrupt safely:** Ctrl-C, then re-run the **same command with `--resume`**. Finished
+segments are checkpointed in `<work_dir>/search_records.jsonl`; trials are in SQLite.
+
+**Logs:** by default, dev mode writes to `<work_dir>/logs/vidopt.log` (and
+`worker-<pid>.log` when using multiple workers). Use `--log-file PATH` to override.
+
+### Phase 4 — Inspect before you deploy
+
+```bash
+vidopt inspect
+```
+
+Watch **hit-rate** on held-out segments (aim for 95 %+). If `--verify` often misses the
+target in production, re-train with a lower `model.crf_quantile` — no re-search needed:
+
+```bash
+vidopt train runs/production/dataset.csv --encoder libsvtav1 --set model.crf_quantile=0.10
+```
+
+### Phase 5 — Compress in production (offline, minutes)
+
+Use the **same `--encoder`** as training. Production never searches; it loads
+`models/<encoder>/target_<T>/`:
+
+```bash
+vidopt compress input.mp4 -o output.mp4 --target 89 --encoder libsvtav1 --verify
+```
+
+See [§3.6](#36-deploying-trained-models-offline-production) for copying models to another
+machine.
+
+## 2.10 Optional: algorithm matrix
+
+For **research or comparison** (not required for production), you can train every search
+algorithm × every CPU encoder at one VMAF target. This takes **days** on a large corpus.
+
+```bash
+python scripts/train_matrix.py --resume
+```
+
+Each combo gets isolated paths so nothing overwrites a production model:
+
+| Artifact | Path |
+|---|---|
+| Work dir | `runs/matrix/<encoder>/<strategy>/` |
+| Model bundle | `models/matrix/<strategy>/<encoder>/target_89/` |
+| Driver log | `runs/matrix/logs/matrix.log` |
+| Combo log | `runs/matrix/logs/<encoder>__<strategy>.log` |
+| Per-segment summary | `runs/matrix/logs/<encoder>__<strategy>.segments.log` |
+| Status | `runs/matrix/status.json` |
+
+Order: `libsvtav1` → `libx265` → `libx264`, each with
+`aq_then_crf`, `coordinate`, `sample`, `bayes`, `tpe`, `cmaes`. GPU encoders are skipped
+when no NVIDIA device is present. On the first error the script **stops** (no partial
+model). Fix and re-run with `--resume`.
+
+**For production, skip the matrix.** Train once with default `aq_then_crf`:
+
+```bash
+vidopt dev video/corpus --config cpu --encoder libsvtav1 \
+  --set search.targets='[89]' --set paths.work_dir=runs/production --resume
+```
+
+Log index: `runs/matrix/logs/INDEX.txt`.
 
 ---
 
@@ -440,6 +745,74 @@ done
 Each invocation already uses every worker, so run them sequentially rather than in
 parallel.
 
+## 3.6 Deploying trained models (offline production)
+
+Production compress needs **vidopt + ffmpeg + the model bundle**. It does **not** need
+the training corpus, `runs/`, or the trial cache unless you want to re-train.
+
+### What a model bundle contains
+
+```
+models/libsvtav1/target_89/
+  metadata.json       schema, feature names/ranges, hit-rate, training sources
+  crf.joblib
+  aq_mode.joblib
+  aq_strength.joblib
+```
+
+`vidopt compress` discovers bundles under `models/<encoder>/target_<T>/` by default
+(`paths.models_dir` in config). Override with `--models-dir` if needed.
+
+### Linux compress package (this machine)
+
+After training, build one archive with runtime + models (no corpus):
+
+```bash
+./scripts/pack_compress.sh
+# -> dist/vidopt-compress-linux-x64.tar.gz
+```
+
+On the production machine:
+
+```bash
+tar xzf vidopt-compress-linux-x64.tar.gz
+cd vidopt-compress-linux-x64
+./vidopt.sh doctor --config cpu
+./vidopt.sh compress in.mp4 -o out/out.mp4 --target 89 --encoder libsvtav1 --verify
+```
+
+See [COMPRESS_GUIDE.md](COMPRESS_GUIDE.md).
+
+### Windows compress package
+
+On a Windows build machine (after `install.bat` and training):
+
+```bat
+scripts\pack_compress.bat
+rem -> dist\vidopt-compress-windows-x64.zip
+```
+
+Extract on the offline PC — no corpus, no training scripts. See [COMPRESS_GUIDE.md](COMPRESS_GUIDE.md).
+
+### Rules that prevent silent mistakes
+
+| Rule | Why |
+|---|---|
+| Same `--encoder` at train and compress | CRF means different things per codec |
+| `--target` must exist in `models/` | `vidopt inspect` lists available targets |
+| Corpus should match production resolution/content | Model extrapolates badly outside training domain (see [§3.3](#33-any-resolution)) |
+| `--verify` on QA passes | Confirms whole-file VMAF; omit in bulk production for speed |
+
+Matrix-trained models live under `models/matrix/<strategy>/<encoder>/target_89/`. Point
+compress at them explicitly:
+
+```bash
+vidopt compress in.mp4 -o out.mp4 --target 89 --encoder libsvtav1 \
+  --models-dir models/matrix/aq_then_crf
+```
+
+For normal deployment use the canonical path: `models/<encoder>/target_<T>/`.
+
 ---
 
 # 4. Tuning
@@ -475,10 +848,21 @@ vidopt train runs/current/dataset.csv --set model.crf_quantile=0.10
 
 | Setting | Default | Effect |
 |---|---|---|
-| `search.n_explore` | 12 | Dominant cost. Higher = better AQ coverage |
-| `search.n_refine_configs` | 2 | AQ settings that get a CRF bisection |
+| `search.strategy` | `aq_then_crf` | How stage A proposes points. See [§2.4](#24-search-algorithms) |
+| `search.sampler` | `sobol` | Space-filling design for `sample` and for bayes/tpe/cmaes init (`sobol`, `lhs`, `halton`, `random`, `grid`) |
+| `search.crf_solver` | `bisect` | 1-D CRF at fixed AQ: `bisect`, `brent`, or `golden` |
+| `search.n_explore` | 12 | Stage-A budget / cap |
+| `search.n_init` | 0 | Initial design for bayes/tpe/cmaes. 0 ⇒ `max(4, n_explore/2)` |
+| `search.n_refine_configs` | 2 | AQ settings that get a full 1-D CRF solve |
+| `search.n_screen_crfs` | 2 | CRF probes per AQ during screening |
+| `search.n_strength_steps` | 5 | Float AQ-strength grid (`libx265`); integer-strength encoders ignore this |
+| `search.max_coordinate_rounds` | 4 | Neighbour-walk iterations (`coordinate` only) |
 | `vmaf.n_subsample_search` | 2 | 2 halves measurement cost for <0.5 VMAF of noise |
 | `encoder.preset` | medium | `veryfast` for exploration, `slow` for final quality |
+
+Changing `search.strategy` / `sampler` / `crf_solver` needs a new `vidopt dev`
+(or `--resume` on an unfinished run).
+`vidopt train` only re-fits the model on existing labels; `vidopt compress` never searches.
 
 ## 4.3 Choosing an encoder
 
@@ -561,9 +945,9 @@ exists. Models are per encoder *and* per target.
 means the corpus does not cover this input; (2) lower `model.crf_quantile`; (3) add
 sources to the corpus and re-run dev mode.
 
-**`frame-count mismatch measuring ...`** — a guard, not a bug: the output and reference
-did not line up frame-for-frame, so the score would be meaningless. Usually the encoder
-dropped or duplicated frames.
+**`frame-count mismatch measuring ...`** — a guard, not a bug: the output produced
+*extra* frames (timestamp padding), so the score would compare the wrong pictures.
+A few frames short at the end (typical of SVT-AV1 on stream-copied cuts) is allowed.
 
 **Segment retried at a conservative CRF** — one segment's encode failed and was retried
 with safer settings so the job could finish. Occasional retries are fine; frequent ones
@@ -584,7 +968,7 @@ point at a resource limit (GPU sessions, disk, memory).
 | `vidopt config` | Print the effective configuration |
 | `vidopt config --list-overlays` | List shipped config overlays |
 
-Common to all: `--config`, `--set KEY=VALUE`, `--log-level`.
+Common to all: `--config`, `--set KEY=VALUE` (e.g. `search.strategy=bayes`), `--log-level`.
 
 Setup script:
 
@@ -597,6 +981,21 @@ Setup script:
 | `python scripts/setup.py --force` | Re-download ffmpeg |
 
 ## A complete first session
+
+Linux (CPU-only):
+
+```bash
+./install.sh
+# copy training videos into video/corpus/
+./vidopt.sh doctor --config cpu
+python scripts/setup.py --verify
+
+./vidopt.sh dev video/corpus --config cpu --encoder libx265 --cpu-workers 0
+./vidopt.sh inspect
+./vidopt.sh compress in.mp4 -o out/out.mp4 --target 89 --encoder libx265 --verify
+```
+
+Windows PowerShell:
 
 ```powershell
 # Install (Windows PowerShell; Linux/macOS differs only in the activate line)

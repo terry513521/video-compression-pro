@@ -8,13 +8,31 @@ hit a target VMAF with the smallest possible file. A slow, offline **dev mode** 
 for those settings by direct measurement and trains a model; a fast **production mode**
 applies the model with no measurement at all.
 
-Runs on **Windows, Linux and macOS**. No Docker, no bash, no make — just Python and
-ffmpeg.
+Runs on **Windows, Linux and macOS**. No Docker, no make — Python and ffmpeg.
 
+**[LINUX.md](LINUX.md) — Linux CPU: install.sh, copy corpus, train, compress.**
 **[OFFLINE_GUIDE.md](OFFLINE_GUIDE.md) — Windows offline: pack, extract, train, compress, repair.**
 **[REPAIR.txt](REPAIR.txt) — short checklist if files are damaged.**
 **[USAGE.md](USAGE.md) — the step-by-step guide: install, dev mode, production mode.**
 **[HANDOFF.md](HANDOFF.md) — start here if you are picking this up on a new machine.**
+
+### Linux (CPU-only)
+
+On a machine with no NVIDIA GPU (this is the supported CPU path):
+
+```bash
+./install.sh
+# copy training videos into video/corpus/
+./vidopt.sh doctor --config cpu
+./vidopt.sh dev video/corpus --config cpu --encoder libx265 --cpu-workers 0
+./vidopt.sh compress in.mp4 -o out/out.mp4 --target 89 --encoder libx265 --verify
+```
+
+`install.sh` creates `.venv`, fetches a **libvmaf** ffmpeg into `vendor/ffmpeg/`, and
+installs vidopt. Copy training videos into `video/corpus/` (USB, disk, another machine)
+before `vidopt dev`. Mix kinds and resolutions the way production will look.
+
+`--cpu-workers 0` sizes the pool from core count. Do not use NVENC on a CPU-only box.
 
 ### Offline production package (Windows)
 
@@ -34,8 +52,15 @@ vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4
 vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libx265 --verify
 ```
 
-Put training / input videos in `video\corpus\`. See [OFFLINE_GUIDE.md](OFFLINE_GUIDE.md)
-and `START_HERE.txt` inside the zip.
+After training, pack models for production (no corpus):
+
+```bash
+./scripts/pack_compress.sh          # Linux -> dist/vidopt-compress-linux-x64.tar.gz
+scripts\pack_compress.bat         # Windows -> dist\vidopt-compress-windows-x64.zip
+```
+
+See [COMPRESS_GUIDE.md](COMPRESS_GUIDE.md). Offline train workflow:
+[USAGE.md §2.9](USAGE.md#29-offline-training-workflow).
 
 ### Scalability & encoder (train / compress)
 
@@ -117,6 +142,9 @@ python -m venv .venv
 # Linux / macOS:       source .venv/bin/activate
 
 python scripts/setup.py
+
+# Linux helper (venv + ffmpeg + doctor --config cpu)
+./install.sh
 ```
 
 `scripts/setup.py` downloads an ffmpeg build **that includes `libvmaf`** into `vendor/`
@@ -146,7 +174,7 @@ python scripts/setup.py --skip-ffmpeg
 
 ```
 corpus ──► segment by scene ──► extract features ──► search parameters ──► train
-             (PySceneDetect)      (18 per segment)     (per VMAF target)    (per target)
+             (PySceneDetect)      (8 per segment)      (per VMAF target)    (per target)
 ```
 
 For every segment and every VMAF target (85, 89, 93 by default), the search answers one
@@ -154,9 +182,21 @@ question by direct measurement:
 
 > What `(crf, aq-mode, aq-strength)` gives the smallest file while still reaching this VMAF?
 
-Two stages: a Sobol sweep to find the best adaptive-quantisation settings for this
-content, then a bisection on CRF against the target. Every encode-and-measure trial is
-cached, so the three targets share their work and an interrupted run resumes for free.
+Default strategy **`aq_then_crf`**: enumerate the encoder's AQ settings, screen each at a
+few CRFs, then a 1-D CRF solve (VMAF falls as CRF rises). Other stage-A algorithms:
+
+| `search.strategy` | Method |
+|---|---|
+| `aq_then_crf` | Enumerate AQ, then CRF-solve (default) |
+| `coordinate` | AQ neighbour walk after the same screen |
+| `sample` | 3-D space-filling design (`search.sampler`: Sobol, LHS, Halton, random, grid) |
+| `bayes` | Gaussian-process Bayesian optimisation |
+| `tpe` | Tree-structured Parzen Estimator |
+| `cmaes` | Diagonal CMA-style evolution strategy |
+
+CRF at fixed AQ is `search.crf_solver`: `bisect` (secant, default), `brent`, or `golden`.
+Every encode-and-measure trial is cached. Switch with `--set search.strategy=…`. Full
+explanations: [USAGE.md §2.4](USAGE.md#24-search-algorithms).
 
 ### Production mode — predict, then encode
 
@@ -171,6 +211,19 @@ chose survive into the final file untouched.
 ---
 
 ## Quick start
+
+Linux (CPU):
+
+```bash
+./install.sh
+# copy training videos into video/corpus/
+./vidopt.sh doctor --config cpu
+./vidopt.sh dev video/corpus --config cpu --encoder libx265 --cpu-workers 0
+./vidopt.sh inspect
+./vidopt.sh compress in.mp4 -o out.mp4 --target 89 --encoder libx265 --verify
+```
+
+Windows:
 
 ```bat
 vidopt.bat doctor
@@ -193,7 +246,7 @@ vidopt.bat dev path\to\corpus --limit 2 --config quick
 |---|---|
 | `vidopt doctor` | Toolchain report; tests encoders by really encoding a frame |
 | `vidopt.bat` / `vidopt` | Same CLI via bundled or installed Python |
-| `vidopt.bat` `dev CORPUS...` | Phase 1: segment, search, train |
+| `vidopt.bat` `dev CORPUS...` | Phase 1: segment, search, train (`--resume` continues an interrupted run) |
 | `vidopt train DATASET` | Re-train from an existing dataset without re-searching |
 | `vidopt compress IN -o OUT` | Phase 2: compress with predicted parameters |
 | `vidopt inspect` | Trained models and their metrics |
@@ -304,7 +357,7 @@ src/vidopt/
   features/        per-segment content analysis
   encoding/        encoder registry, parameter space, pixel-format resolution
   quality/         VMAF measurement
-  search/          samplers, trial cache, optimizer
+  search/          AQ/CRF strategies, samplers, Bayesian/TPE/CMA-ES, trial cache
   modeling/        dataset, training, versioned model bundles
   pipeline/        dev and production orchestration
 ```

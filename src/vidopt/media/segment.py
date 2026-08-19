@@ -54,6 +54,16 @@ class Segment:
             "duration": round(self.duration, 3),
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> Segment:
+        return cls(
+            index=int(data["index"]),
+            path=str(data["path"]),
+            source=str(data["source"]),
+            start=float(data["start"]),
+            duration=float(data["duration"]),
+        )
+
 
 # --------------------------------------------------------------------------------------
 # Detection

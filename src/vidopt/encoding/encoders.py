@@ -58,6 +58,13 @@ class Encoder(ABC):
     def quality_args(self, params: EncodeParams) -> list[str]:
         """Encoder-specific flags for (crf, aq_mode, aq_strength)."""
 
+    def ffmpeg_preset(self, preset: str) -> str:
+        """Translate a config preset into the value this encoder's ``-preset`` accepts.
+
+        x264/x265 use names (``medium``). SVT-AV1 uses integers -2..13.
+        """
+        return preset
+
     def gop_args(self, request: EncodeRequest) -> list[str]:
         """Closed-GOP settings so independently encoded segments concatenate cleanly."""
         fps = request.fps if request.fps > 0 else 30.0
@@ -76,7 +83,7 @@ class Encoder(ABC):
             "-pix_fmt", request.pix_fmt,
         ]
         if request.preset:
-            argv += ["-preset", request.preset]
+            argv += ["-preset", self.ffmpeg_preset(request.preset)]
         argv += self.quality_args(request.params)
         argv += self.gop_args(request)
         if request.threads > 0:
@@ -132,7 +139,7 @@ class _X26xEncoder(Encoder):
             "-map", "0:v:0", "-an", "-sn", "-dn",
             "-c:v", self.ffmpeg_encoder,
             "-pix_fmt", request.pix_fmt,
-            "-preset", request.preset,
+            "-preset", self.ffmpeg_preset(request.preset),
             "-crf", f"{p.crf:g}",
             self.params_flag, self._codec_params(request),
         ]
@@ -189,6 +196,37 @@ class LibSvtAv1(Encoder):
         aq_strength_is_integer=True,
     )
 
+    # libsvtav1 ``-preset`` is an integer -2..13 (not x264 names). Default -2 = encoder
+    # default. Named values from --config cpu / quick map onto that scale.
+    _NAMED_PRESETS = {
+        "placebo": "0",
+        "veryslow": "1",
+        "slower": "2",
+        "slow": "4",
+        "medium": "6",
+        "fast": "8",
+        "faster": "9",
+        "veryfast": "10",
+        "superfast": "12",
+        "ultrafast": "13",
+    }
+
+    def ffmpeg_preset(self, preset: str) -> str:
+        key = preset.strip().lower()
+        if key in self._NAMED_PRESETS:
+            return self._NAMED_PRESETS[key]
+        try:
+            n = int(key)
+        except ValueError as exc:
+            names = ", ".join(self._NAMED_PRESETS)
+            raise EncodeError(
+                f"libsvtav1 -preset must be an integer -2..13 or one of: {names}. "
+                f"Got {preset!r}."
+            ) from exc
+        if not -2 <= n <= 13:
+            raise EncodeError(f"libsvtav1 -preset must be -2..13, got {preset!r}")
+        return str(n)
+
     def quality_args(self, params: EncodeParams) -> list[str]:
         p = self.space.clamp(params)
         return ["-crf", f"{p.crf:g}"]
@@ -207,9 +245,12 @@ class LibSvtAv1(Encoder):
             "-loglevel", request.loglevel,
             "-i", request.input_path,
             "-map", "0:v:0", "-an", "-sn", "-dn",
+            # Do not let ffmpeg drop/dup frames to a guessed CFR. VMAF aligns by
+            # frame index; a short tail is tolerable, a resampled stream is not.
+            "-fps_mode", "passthrough",
             "-c:v", self.ffmpeg_encoder,
             "-pix_fmt", request.pix_fmt,
-            "-preset", request.preset,
+            "-preset", self.ffmpeg_preset(request.preset),
             "-crf", f"{p.crf:g}",
             "-svtav1-params", svt,
         ]

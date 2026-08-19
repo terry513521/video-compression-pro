@@ -81,32 +81,54 @@ def read_dataset(path: str | Path) -> list[dict[str, str]]:
 
 
 def to_matrices(
-    rows: list[dict[str, str]], target: float, *, feasible_only: bool = True
+    rows: list[dict[str, str]],
+    target: float | None = None,
+    *,
+    feasible_only: bool = True,
+    include_vmaf_target: bool = False,
 ) -> tuple[np.ndarray, dict[str, np.ndarray], list[dict[str, str]]]:
-    """Build (X, {label: y}, kept_rows) for one VMAF target.
+    """Build (X, {label: y}, kept_rows).
 
-    Infeasible rows — segments where no parameters reached the target — are excluded by
-    default. Training on them would teach the model to aim at an unreachable point.
+    - v2 unified training: ``include_vmaf_target=True`` and no ``target`` filter.
+    - v1 legacy training: pass ``target=<float>`` and keep ``include_vmaf_target=False``.
     """
-    selected = [r for r in rows if abs(float(r["target"]) - target) < 1e-6]
+    selected = list(rows)
+    if target is not None:
+        selected = [r for r in selected if abs(float(r["target"]) - target) < 1e-6]
     if feasible_only:
         selected = [r for r in selected if str(r["feasible"]).lower() in {"true", "1"}]
 
     if not selected:
-        raise ModelError(
-            f"no usable training rows for target {target:g}. "
-            "Either dev mode found no feasible parameters, or the target is not in the "
-            "dataset."
+        hint = (
+            f"no usable training rows for target {target:g}"
+            if target is not None
+            else "no feasible training rows in the dataset"
         )
+        raise ModelError(f"{hint}.")
 
-    features = np.array(
-        [[float(r[name]) for name in FEATURE_NAMES] for r in selected], dtype=np.float64
+    scene = np.array(
+        [[float(r[name]) for name in FEATURE_NAMES] for r in selected],
+        dtype=np.float64,
     )
+    if include_vmaf_target:
+        targets_col = np.array([[float(r["target"])] for r in selected], dtype=np.float64)
+        features = np.hstack([scene, targets_col])
+    else:
+        features = scene
+
     labels = {
         name: np.array([float(r[name]) for r in selected], dtype=np.float64)
         for name in LABEL_NAMES
     }
     return features, labels, selected
+
+
+def training_targets(rows: list[dict[str, str]], *, feasible_only: bool = True) -> list[float]:
+    """Distinct VMAF targets present in feasible rows."""
+    selected = rows
+    if feasible_only:
+        selected = [r for r in rows if str(r["feasible"]).lower() in {"true", "1"}]
+    return sorted({float(r["target"]) for r in selected})
 
 
 def group_labels(rows: list[dict[str, str]]) -> np.ndarray:

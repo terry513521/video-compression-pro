@@ -16,8 +16,11 @@ What changed from the earlier 18-feature set:
 
 from __future__ import annotations
 
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 import cv2
 import numpy as np
@@ -28,6 +31,41 @@ from ..ffmpeg.probe import MediaInfo
 from ..log import get_logger
 
 log = get_logger(__name__)
+
+# OpenCV's FFmpeg backend prints H.264 DPB/MMCO warnings at ERROR when seeking into
+# stream-copied cuts (``mmco: unref short failure``). Harmless; they drown the job log.
+_AV_LOG_FATAL = "8"
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", _AV_LOG_FATAL)
+
+
+@contextmanager
+def _suppress_native_stderr() -> Iterator[None]:
+    """Mute libc-level stderr for the duration of a decode.
+
+    libavcodec is often linked into the OpenCV wheel, so Python logging and
+    ``OPENCV_FFMPEG_LOGLEVEL`` (read only at first capture init) cannot always
+    reach it — especially after a forked worker inherits an already-initialised
+    ffmpeg. Dup2 on fd 2 always works. Set ``VIDOPT_SHOW_DECODER_LOGS=1`` to keep
+    the chatter.
+    """
+    if os.environ.get("VIDOPT_SHOW_DECODER_LOGS"):
+        yield
+        return
+    try:
+        saved = os.dup(2)
+    except OSError:
+        yield
+        return
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, 2)
+        finally:
+            os.close(devnull)
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
 
 # Compact 8-feature schema (aligned with ref SI/TI/luma labels).
 # Order matters: it is the column order of the model's design matrix and is stored in
@@ -43,6 +81,20 @@ FEATURE_NAMES: tuple[str, ...] = (
     "color_complexity",  # mean per-channel entropy
     "log_pixels",  # resolution prior (log10 width*height)
 )
+
+# Unified-model schema: scene features + requested VMAF target at inference.
+VMAF_TARGET_FEATURE: str = "vmaf_target"
+MODEL_FEATURE_NAMES: tuple[str, ...] = FEATURE_NAMES + (VMAF_TARGET_FEATURE,)
+
+
+def with_vmaf_target(scene: np.ndarray, vmaf_target: float) -> np.ndarray:
+    """Append ``vmaf_target`` to an 8-D scene vector."""
+    row = np.atleast_1d(np.asarray(scene, dtype=np.float64)).reshape(-1)
+    if row.size != len(FEATURE_NAMES):
+        raise ValueError(
+            f"expected {len(FEATURE_NAMES)} scene features, got {row.size}"
+        )
+    return np.append(row, float(vmaf_target))
 
 
 @dataclass(frozen=True)
@@ -98,62 +150,68 @@ def extract(
         FeatureExtractionError: The file cannot be decoded or yields no frames.
     """
     path = Path(path)
-    capture = cv2.VideoCapture(str(path))
-    if not capture.isOpened():
-        raise FeatureExtractionError(f"OpenCV cannot open {path}")
-
     try:
-        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total <= 0:
-            total = info.n_frames
-        wanted = _sample_indices(total, config.max_frames)
-        if not wanted:
-            raise FeatureExtractionError(f"{path.name} reports no frames")
+        cv2.setLogLevel(cv2.LOG_LEVEL_ERROR)
+    except AttributeError:
+        pass
 
-        color: list[float] = []
-        spatial: list[float] = []
-        luma_mean: list[float] = []
-        luma_std: list[float] = []
-        motion: list[float] = []
-        temporal: list[float] = []
+    with _suppress_native_stderr():
+        capture = cv2.VideoCapture(str(path))
+        if not capture.isOpened():
+            raise FeatureExtractionError(f"OpenCV cannot open {path}")
 
-        previous: np.ndarray | None = None
-        analysed = 0
+        try:
+            total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total <= 0:
+                total = info.n_frames
+            wanted = _sample_indices(total, config.max_frames)
+            if not wanted:
+                raise FeatureExtractionError(f"{path.name} reports no frames")
 
-        for index in wanted:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, index)
-            ok, frame = capture.read()
-            if not ok or frame is None:
-                continue
+            color: list[float] = []
+            spatial: list[float] = []
+            luma_mean: list[float] = []
+            luma_std: list[float] = []
+            motion: list[float] = []
+            temporal: list[float] = []
 
-            height, width = frame.shape[:2]
-            if width > config.analysis_width:
-                scale = config.analysis_width / width
-                frame = cv2.resize(
-                    frame,
-                    (config.analysis_width, max(2, int(round(height * scale)))),
-                    interpolation=cv2.INTER_AREA,
-                )
+            previous: np.ndarray | None = None
+            analysed = 0
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            color.append(float(np.mean([_entropy(c) for c in cv2.split(frame)])))
+            for index in wanted:
+                capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+                ok, frame = capture.read()
+                if not ok or frame is None:
+                    continue
 
-            sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-            sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-            spatial.append(float(np.std(cv2.magnitude(sobel_x, sobel_y))))
+                height, width = frame.shape[:2]
+                if width > config.analysis_width:
+                    scale = config.analysis_width / width
+                    frame = cv2.resize(
+                        frame,
+                        (config.analysis_width, max(2, int(round(height * scale)))),
+                        interpolation=cv2.INTER_AREA,
+                    )
 
-            luma_mean.append(float(np.mean(gray)))
-            luma_std.append(float(np.std(gray)))
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                color.append(float(np.mean([_entropy(c) for c in cv2.split(frame)])))
 
-            if previous is not None and previous.shape == gray.shape:
-                difference = cv2.absdiff(previous, gray)
-                motion.append(float(np.mean(difference)) / 255.0)
-                temporal.append(float(np.std(difference)))
+                sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+                sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+                spatial.append(float(np.std(cv2.magnitude(sobel_x, sobel_y))))
 
-            previous = gray
-            analysed += 1
-    finally:
-        capture.release()
+                luma_mean.append(float(np.mean(gray)))
+                luma_std.append(float(np.std(gray)))
+
+                if previous is not None and previous.shape == gray.shape:
+                    difference = cv2.absdiff(previous, gray)
+                    motion.append(float(np.mean(difference)) / 255.0)
+                    temporal.append(float(np.std(difference)))
+
+                previous = gray
+                analysed += 1
+        finally:
+            capture.release()
 
     if analysed < 2:
         raise FeatureExtractionError(

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -80,6 +81,11 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity (default: from config).",
     )
+    parser.add_argument(
+        "--log-file", default=None, metavar="PATH",
+        help="Also write logs to this file (default: <work_dir>/logs/vidopt.log).",
+    )
+
 
 
 def _cli_overrides(args: argparse.Namespace) -> list[str]:
@@ -106,7 +112,10 @@ def _resolve_config(args: argparse.Namespace) -> tuple[Config, list[str], list[s
     ]
     overrides = _cli_overrides(args)
     config = load_config(paths, overrides)
-    setup_logging(args.log_level or config.log_level)
+    log_file = getattr(args, "log_file", None) or str(
+        Path(config.paths.work_dir) / "logs" / "vidopt.log"
+    )
+    setup_logging(args.log_level or config.log_level, log_file=log_file)
     return config, paths, overrides
 
 
@@ -132,6 +141,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"configured encoder : {config.encoder.name}")
     print(f"vmaf model         : {config.vmaf.model}")
     print(f"vmaf pooling       : {config.vmaf.pool}")
+    print(
+        f"search strategy    : {config.search.strategy}  "
+        f"sampler={config.search.sampler}  crf_solver={config.search.crf_solver}"
+    )
     print(f"targets            : {', '.join(f'{t:g}' for t in config.search.targets)}")
     print(f"cpu workers        : {config.resolved_cpu_workers()}")
     print(f"gpu workers        : {config.jobs.gpu_workers}")
@@ -189,6 +202,7 @@ def cmd_dev(args: argparse.Namespace) -> int:
         overrides,
         limit=args.limit,
         skip_training=args.no_train,
+        resume=args.resume,
     )
 
     print()
@@ -249,7 +263,7 @@ def cmd_compress(args: argparse.Namespace) -> int:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    from .modeling.bundle import ModelBundle
+    from .modeling.bundle import ModelBundle, list_bundles
 
     config, _, _ = _resolve_config(args)
     root = Path(args.models_dir or config.paths.models_dir)
@@ -257,7 +271,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         print(f"no models directory at {root}. Run `vidopt dev` first.")
         return 1
 
-    found = sorted(p for p in root.glob("*/target_*") if (p / "metadata.json").is_file())
+    found = list_bundles(root)
     if not found:
         print(f"no model bundles under {root}. Run `vidopt dev` first.")
         return 1
@@ -272,7 +286,15 @@ def cmd_inspect(args: argparse.Namespace) -> int:
         metrics = meta.metrics
         print("-" * 74)
         print(f"{directory}")
-        print(f"  encoder       {meta.encoder}   target VMAF {meta.target:g}")
+        if "vmaf_target" in meta.feature_names:
+            trained = meta.training_targets or metrics.get("training_targets", [])
+            if trained:
+                text = f"{min(trained):g}..{max(trained):g}"
+            else:
+                text = "unknown"
+            print(f"  encoder       {meta.encoder}   VMAF range {text}")
+        else:
+            print(f"  encoder       {meta.encoder}   target VMAF {meta.target:g} (legacy)")
         print(
             f"  trained on    {meta.n_train} row(s) "
             f"from {len(meta.training_sources)} source(s)"
@@ -339,8 +361,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "typical workflow:\n"
-            "  vidopt doctor\n"
-            "  vidopt dev video\\corpus --encoder libx265 --cpu-workers 4\n"
+            "  vidopt doctor --config cpu\n"
+            "  vidopt dev video/corpus --config cpu --encoder libx265 --cpu-workers 0\n"
             "  vidopt compress in.mp4 -o out.mp4 --target 89 --encoder libx265 --verify\n"
             "\n"
             "scalability:\n"
@@ -363,6 +385,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_dev.add_argument("--limit", type=int, default=None, help="Use at most N sources.")
     p_dev.add_argument(
         "--no-train", action="store_true", help="Build the dataset but skip training."
+    )
+    p_dev.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Continue an interrupted `vidopt dev` in the same work directory. "
+            "Reuses existing scene cuts and skips segments already searched."
+        ),
     )
     _add_common(p_dev)
     p_dev.set_defaults(func=cmd_dev)
@@ -418,6 +448,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before OpenCV/ffmpeg first init: drop H.264 MMCO chatter from stream-copied cuts.
+    os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "8")
     parser = build_parser()
     args = parser.parse_args(argv)
     setup_logging("INFO")

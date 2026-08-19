@@ -21,8 +21,12 @@ Related docs: [README.md](README.md) · [USAGE.md](USAGE.md) · [HANDOFF.md](HAN
 6. [Verify the toolchain](#6-verify-the-toolchain)
 7. [Prepare and copy the video corpus](#7-prepare-and-copy-the-video-corpus)
 8. [Train the ML models](#8-train-the-ml-models)
+   - [8.7 Search algorithms](#87-search-algorithms-when-to-change)
+   - [8.8 Optional matrix training](#88-optional-train-every-algorithm-matrix)
+   - [8.9 Training logs](#89-training-logs)
 9. [Inspect trained models](#9-inspect-trained-models)
 10. [Compress a video](#10-compress-a-video)
+   - [10.5 Offline production deploy](#105-offline-production-deploy-models--runtime)
 11. [Day-to-day CLI cheat sheet](#11-day-to-day-cli-cheat-sheet)
 12. [Tuning and re-training](#12-tuning-and-re-training)
 13. [Repair (damaged or missing files)](#13-repair-damaged-or-missing-files)
@@ -276,11 +280,28 @@ vidopt dev E:\video-compression\video\corpus --config cpu `
 ```
 stage 1/4  segment by scene cuts
 stage 2/4  hash segments (trial cache keys)
-stage 3/4  search: encode + VMAF for many (crf, aq) settings   â† slow
+stage 3/4  search: encode + VMAF (default: enumerate AQ, then bisect CRF)   ← slow
 stage 4/4  train models → models\<encoder>\target_<T>\
 ```
 
 Expect **hours** on 4K. That is normal.
+
+Search strategy is `search.strategy` (default `aq_then_crf`). Algorithms, samplers, and
+CRF solvers: [USAGE.md §2.4](USAGE.md#24-search-algorithms).
+
+```powershell
+# AQ neighbour walk
+vidopt dev E:\video-compression\video\corpus --config cpu `
+  --set search.strategy=coordinate
+
+# 3-D Sobol design
+vidopt dev E:\video-compression\video\corpus --config cpu `
+  --set search.strategy=sample --set search.sampler=sobol
+
+# Bayesian optimisation
+vidopt dev E:\video-compression\video\corpus --config cpu `
+  --set search.strategy=bayes --set search.sampler=lhs
+```
 
 ### 8.4 Interrupt and resume
 
@@ -319,7 +340,54 @@ Get-Content E:\video-compression\runs\logs\dev.err.log -Wait -Tail 30
 | `runs\production\dataset.csv` | labelled rows (segment Ã— target) |
 | `runs\production\dev_summary.json` | run summary + metrics |
 | `runs\cache\trials.sqlite` | all encode/VMAF trials (resume cache) |
-| `models\libx265\target_85\` â€¦ | deployable model bundles |
+| `models\libx265\target_85\` … | deployable model bundles |
+
+### 8.7 Search algorithms (when to change)
+
+Dev mode **searches** encoder parameters; production **predicts** from the trained model.
+The search algorithm only affects **training quality and time**, not how compress runs.
+
+Default (recommended for production): `search.strategy=aq_then_crf`. Full catalog:
+[USAGE.md §2.4](USAGE.md#24-search-algorithms).
+
+| Strategy | Use when |
+|---|---|
+| `aq_then_crf` | Normal training (default) |
+| `coordinate` | x265 float AQ-strength interacts with neighbours |
+| `sample` | Baseline 3-D design (Sobol/LHS/Halton) |
+| `bayes` / `tpe` / `cmaes` | Research; slower, no guarantee vs default |
+
+```powershell
+vidopt dev E:\video-compression\video\corpus --config cpu `
+  --encoder libsvtav1 --cpu-workers 4 `
+  --set search.targets=[89] `
+  --set paths.work_dir=runs/production `
+  --resume
+```
+
+### 8.8 Optional: train every algorithm (matrix)
+
+**Not required for production.** Compares search algorithms offline (days on a large corpus):
+
+```powershell
+python scripts\train_matrix.py --resume
+```
+
+Writes to `models\matrix\<strategy>\<encoder>\target_89\`. Logs under `runs\matrix\logs\`.
+See [USAGE.md §2.10](USAGE.md#210-optional-algorithm-matrix).
+
+### 8.9 Training logs
+
+| Log | Path |
+|---|---|
+| Main dev log | `<work_dir>\logs\vidopt.log` |
+| Worker logs | `<work_dir>\logs\worker-<pid>.log` |
+| Segment checkpoint | `<work_dir>\search_records.jsonl` |
+| Trial cache | `runs\cache\trials.sqlite` |
+
+```powershell
+Get-Content E:\video-compression\runs\production\logs\vidopt.log -Wait -Tail 30
+```
 
 ---
 
@@ -401,12 +469,46 @@ Get-ChildItem E:\in\*.mp4 | ForEach-Object {
 
 Production does **not** need the internet and does **not** need VMAF unless `--verify`.
 
-### 10.5 Shipping production-only
+### 10.5 Offline production deploy (compress-only archive)
+
+**Recommended:** one zip/tar with runtime + models, **no corpus**.
+
+| Platform | Build (after training) | Output |
+|---|---|---|
+| Linux | `./scripts/pack_compress.sh` | `dist/vidopt-compress-linux-x64.tar.gz` |
+| Windows | `scripts\pack_compress.bat` | `dist\vidopt-compress-windows-x64.zip` |
+
+**Excluded from the archive:** `video/corpus`, `video/test`, `runs/`, training scripts
+(`download_corpus.py`, `train_matrix.py`), dev search cache.
+
+**Included:** `.venv` (Linux) or `vendor\python` (Windows), `vendor\ffmpeg`, `src\`,
+trained `models/<encoder>/target_<T>/`, `out\` (empty), `COMPRESS_GUIDE.md`,
+`PACKAGE.json` (model manifest).
+
+```bash
+# Linux production machine
+tar xzf vidopt-compress-linux-x64.tar.gz
+cd vidopt-compress-linux-x64
+./vidopt.sh doctor --config cpu
+./vidopt.sh inspect
+./vidopt.sh compress in.mp4 -o out\out.mp4 --target 89 --encoder libsvtav1 --verify
+```
+
+```bat
+REM Windows production machine
+vidopt.bat doctor
+vidopt.bat inspect
+vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libsvtav1 --verify
+```
+
+Full guide: [COMPRESS_GUIDE.md](COMPRESS_GUIDE.md).
+
+### 10.6 Shipping production-only (minimal copy)
 
 On a machine that only compresses (models already trained), copy:
 
-1. Project + `vendor\` + `.venv` setup (§5), **or** recreate venv from wheelhouse  
-2. The `models\` directory  
+1. Project + `vendor\` + `.venv` setup (§5), **or** the production zip with `--with-models`
+2. The `models\` directory tree for your encoder/target(s)
 
 Then only run `vidopt compress ...`.
 
@@ -471,6 +573,18 @@ Default `crf_quantile` is `0.15`. If `--verify` often reports **MISSED**, lower 
 If many rows are **infeasible** during search, the target may be too high for that
 encoder/preset, or the content is extreme — add more similar corpus clips or lower the
 target.
+
+To change **how** parameters are searched (requires a new `vidopt dev`, not just
+`vidopt train`):
+
+```powershell
+vidopt dev E:\video-compression\video\corpus --config cpu `
+  --set search.strategy=coordinate
+```
+
+`aq_then_crf` (default) enumerates AQ then solves CRF. Also available: `coordinate`,
+`sample` (3-D Sobol/LHS/Halton), `bayes`, `tpe`, `cmaes`. CRF solver: `bisect` /
+`brent` / `golden`. Compress never re-searches. See [USAGE.md §2.4](USAGE.md#24-search-algorithms).
 
 
 ---

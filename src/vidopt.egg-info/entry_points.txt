@@ -1,0 +1,2 @@
+[console_scripts]
+vidopt = vidopt.cli:main

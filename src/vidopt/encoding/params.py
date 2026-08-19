@@ -89,6 +89,61 @@ class ParamSpace:
             )
         )
 
+    def strength_grid(self, n_steps: int = 5) -> tuple[float, ...]:
+        """Discrete AQ strengths: every integer, or ``n_steps`` floats."""
+        if self.aq_strength_is_integer:
+            lo = int(round(self.aq_strength_min))
+            hi = int(round(self.aq_strength_max))
+            if hi < lo:
+                lo, hi = hi, lo
+            return tuple(float(s) for s in range(lo, hi + 1))
+        n = max(2, int(n_steps))
+        span = self.aq_strength_max - self.aq_strength_min
+        if span <= 0:
+            return (float(self.aq_strength_min),)
+        return tuple(
+            self.aq_strength_min + span * i / (n - 1) for i in range(n)
+        )
+
+    def aq_grid(self, n_strength_steps: int = 5) -> list[tuple[int, float]]:
+        """Every ``(aq_mode, aq_strength)`` the structured search should try."""
+        seen: set[tuple[int, float]] = set()
+        out: list[tuple[int, float]] = []
+        dummy_crf = (self.crf_min + self.crf_max) / 2.0
+        for mode in self.aq_modes:
+            for strength in self.strength_grid(n_strength_steps):
+                p = self.clamp(
+                    EncodeParams(crf=dummy_crf, aq_mode=mode, aq_strength=strength)
+                )
+                key = (p.aq_mode, p.aq_strength)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+        return out
+
+    def aq_neighbors(
+        self, aq_mode: int, aq_strength: float, n_strength_steps: int = 5
+    ) -> list[tuple[int, float]]:
+        """4-neighbour AQ settings on the same grid (mode ±1, strength ±1)."""
+        modes = list(self.aq_modes)
+        strengths = list(self.strength_grid(n_strength_steps))
+        if not modes or not strengths:
+            return []
+        mode = min(modes, key=lambda m: abs(m - int(aq_mode)))
+        strength = min(strengths, key=lambda s: abs(s - float(aq_strength)))
+        mi = modes.index(mode)
+        si = strengths.index(strength)
+        cand: list[tuple[int, float]] = []
+        if mi > 0:
+            cand.append((modes[mi - 1], strength))
+        if mi + 1 < len(modes):
+            cand.append((modes[mi + 1], strength))
+        if si > 0:
+            cand.append((mode, strengths[si - 1]))
+        if si + 1 < len(strengths):
+            cand.append((mode, strengths[si + 1]))
+        return cand
+
     def to_dict(self) -> dict[str, object]:
         return {
             "crf_min": self.crf_min,

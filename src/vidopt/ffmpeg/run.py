@@ -64,7 +64,15 @@ def run(
         raise CommandError(argv, 124, f"timed out after {timeout}s\n{stderr}") from exc
 
     elapsed = time.monotonic() - started
+    if proc.stderr and proc.stderr.strip():
+        log.debug("stderr (%s): %s", argv[0], proc.stderr.strip()[:4000])
     if check and proc.returncode != 0:
+        log.error(
+            "command failed rc=%s: %s\n%s",
+            proc.returncode,
+            " ".join(argv),
+            (proc.stderr or proc.stdout or "").strip()[:8000],
+        )
         raise CommandError(argv, proc.returncode, proc.stderr or proc.stdout or "")
     return CommandResult(
         argv=argv, stdout=proc.stdout, stderr=proc.stderr, seconds=elapsed

@@ -133,6 +133,34 @@ def expected_scored_frames(n_frames: int, n_subsample: int) -> int:
     return (n_frames - 1) // step + 1
 
 
+# Extra scored frames (timestamp padding / duplicates) destroy harmonic-mean VMAF —
+# that is the 66-frame clip that became 67 and dropped from 94 to 86. A *short*
+# encode is different: SVT-AV1 and stream-copied MKV cuts routinely drop a few
+# pictures at EOS. ``setpts=N-STARTPTS`` still compares frame i to frame i; we
+# only lose the tail. Allow a handful of missing source frames, reject extras.
+_MAX_SHORT_SOURCE_FRAMES = 4
+
+
+def scored_count_mismatch(
+    scored: int, expected_source_frames: int, n_subsample: int
+) -> str | None:
+    """Return an error message if ``scored`` is not a trustworthy libvmaf count."""
+    wanted = expected_scored_frames(expected_source_frames, n_subsample)
+    extra_slack = 1
+    short_slack = expected_scored_frames(_MAX_SHORT_SOURCE_FRAMES, max(1, n_subsample))
+    if scored > wanted + extra_slack:
+        return (
+            f"libvmaf scored {scored} frame(s) but the {expected_source_frames}-frame "
+            f"reference at n_subsample={n_subsample} should give {wanted}"
+        )
+    if scored < wanted - short_slack:
+        return (
+            f"libvmaf scored {scored} frame(s) but the {expected_source_frames}-frame "
+            f"reference at n_subsample={n_subsample} should give {wanted}"
+        )
+    return None
+
+
 def measure(
     distorted: str | os.PathLike[str],
     reference: str | os.PathLike[str],
@@ -224,14 +252,12 @@ def measure(
         )
 
     if expected_frames is not None and expected_frames > 0:
-        wanted = expected_scored_frames(expected_frames, subsample)
-        # One frame of slack absorbs off-by-one rounding in libvmaf's subsampling.
-        if abs(len(frames) - wanted) > 1:
+        mismatch = scored_count_mismatch(len(frames), expected_frames, subsample)
+        if mismatch is not None:
             raise VmafError(
-                f"frame-count mismatch measuring {dist_path.name}: libvmaf scored "
-                f"{len(frames)} frame(s) but the {expected_frames}-frame reference "
-                f"at n_subsample={subsample} should give {wanted}. The two streams "
-                "were not compared frame-for-frame, so the score is meaningless."
+                f"frame-count mismatch measuring {dist_path.name}: {mismatch}. "
+                "The two streams were not compared frame-for-frame, so the score "
+                "is meaningless."
             )
 
     mean = float(pooled.get("mean", 0.0))

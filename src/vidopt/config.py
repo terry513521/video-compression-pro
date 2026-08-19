@@ -122,15 +122,50 @@ class SearchConfig:
     """Parameter search (dev mode)."""
 
     targets: list[float] = field(default_factory=lambda: [85.0, 89.0, 93.0])
+    """VMAF levels to label during search (one row per segment × target in the dataset).
+
+    Training fits one model per encoder; ``--target`` is provided at compress time as
+    a model input feature. Wider range improves interpolation/extrapolation stability.
+    Override with ``--set search.targets='[85,89,93]'``."""
+
+    strategy: str = "aq_then_crf"
+    """How stage A proposes (crf, AQ) points.
+
+    'aq_then_crf'  enumerate AQ, screen, then 1-D CRF solve (default)
+    'coordinate'   AQ neighbour walk after the same screen
+    'sample'       3-D space-filling design (see sampler)
+    'bayes'        GP Bayesian optimisation after an initial design
+    'tpe'          Tree-structured Parzen Estimator
+    'cmaes'        diagonal CMA-style evolution strategy
+    """
 
     sampler: str = "sobol"
-    """'sobol' (low-discrepancy, best at small budgets), 'random', or 'grid'."""
+    """Space-filling design for strategy='sample' and for bayes/tpe/cmaes init:
+    'sobol', 'lhs', 'halton', 'random', 'grid'."""
+
+    crf_solver: str = "bisect"
+    """1-D solver for CRF at fixed AQ: 'bisect' (secant), 'brent', 'golden'."""
 
     n_explore: int = 12
-    """Stage-A trials per (segment, target)."""
+    """Stage-A trial budget. Structured strategies treat this as a cap, not a 3-D count."""
+
+    n_init: int = 0
+    """Initial design size for bayes/tpe/cmaes. 0 => max(4, n_explore/2)."""
 
     n_refine_configs: int = 2
-    """How many AQ settings from stage A get a CRF bisection."""
+    """How many AQ settings from stage A get a 1-D CRF solve."""
+
+    top_k_per_segment: int = 5
+    """How many best feasible parameter points to keep per segment/target for training."""
+
+    n_strength_steps: int = 5
+    """Float AQ-strength grid size (ignored when the encoder uses integer strength)."""
+
+    n_screen_crfs: int = 2
+    """CRF probes per AQ during aq_then_crf / coordinate screening."""
+
+    max_coordinate_rounds: int = 4
+    """Neighbour-walk iterations for strategy='coordinate'."""
 
     max_bisect_iters: int = 6
     crf_tolerance: float = 0.5
@@ -343,6 +378,8 @@ def load_config(
 def validate(config: Config) -> None:
     """Reject configurations that cannot possibly work."""
     from .encoding.encoders import ENCODERS  # local import: avoids a cycle
+    from .search.optimizer import CRF_SOLVERS, STRATEGIES
+    from .search.samplers import SAMPLERS
 
     if config.encoder.name not in ENCODERS:
         raise ConfigError(
@@ -362,11 +399,32 @@ def validate(config: Config) -> None:
         if not 0.0 < target <= 100.0:
             raise ConfigError(f"search target out of range: {target}")
 
-    if config.search.sampler not in {"sobol", "random", "grid"}:
-        raise ConfigError(f"unknown search.sampler {config.search.sampler!r}")
+    strategy = str(config.search.strategy).strip().lower()
+    if strategy not in STRATEGIES:
+        raise ConfigError(
+            f"unknown search.strategy {config.search.strategy!r}. "
+            f"Available: {list(STRATEGIES)}"
+        )
+
+    sampler = str(config.search.sampler).strip().lower()
+    if sampler not in SAMPLERS:
+        raise ConfigError(
+            f"unknown search.sampler {config.search.sampler!r}. "
+            f"Available: {sorted(SAMPLERS)}"
+        )
+
+    solver = str(config.search.crf_solver).strip().lower()
+    if solver not in CRF_SOLVERS:
+        raise ConfigError(
+            f"unknown search.crf_solver {config.search.crf_solver!r}. "
+            f"Available: {list(CRF_SOLVERS)}"
+        )
 
     if config.search.n_explore < 4:
         raise ConfigError("search.n_explore must be >= 4 to cover the AQ space")
+
+    if config.search.n_init < 0:
+        raise ConfigError("search.n_init must be >= 0 (0 = automatic)")
 
     if config.search.n_refine_configs < 1:
         raise ConfigError("search.n_refine_configs must be >= 1")

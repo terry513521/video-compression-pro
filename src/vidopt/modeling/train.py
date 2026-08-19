@@ -1,7 +1,7 @@
 """Training.
 
-One bundle per (encoder, VMAF target). Three heads: ``crf`` (regression), ``aq_mode``
-(classification), ``aq_strength`` (regression).
+Unified mode: one bundle per encoder. Three heads: ``crf`` (regression), ``aq_mode``
+(classification), ``aq_strength`` (regression). ``vmaf_target`` is part of model input.
 
 **The important design point is the CRF loss.** The objective drops to *zero* below
 ``target - 5`` (see ``scoring.py``), so the cost of prediction error is asymmetric:
@@ -41,10 +41,10 @@ from sklearn.metrics import accuracy_score, mean_absolute_error, r2_score
 
 from ..config import Config
 from ..errors import ModelError
-from ..features.extract import FEATURE_NAMES
+from ..features.extract import MODEL_FEATURE_NAMES
 from ..log import get_logger
-from .bundle import SCHEMA_VERSION, BundleMetadata, ModelBundle
-from .dataset import LABEL_NAMES, group_labels, to_matrices
+from .bundle import SCHEMA_VERSION, BundleMetadata, ModelBundle, bundle_dir
+from .dataset import LABEL_NAMES, group_labels, to_matrices, training_targets
 
 log = get_logger(__name__)
 
@@ -53,10 +53,10 @@ MIN_TRAINING_ROWS = 8
 
 @dataclass
 class TrainReport:
-    """Per-target training outcome, suitable for printing or serialising."""
+    """Per-encoder training outcome, suitable for printing or serialising."""
 
-    target: float
     encoder: str
+    training_targets: list[float]
     n_train: int
     n_val: int
     metrics: dict[str, Any]
@@ -66,8 +66,9 @@ class TrainReport:
         m = self.metrics
         hit = m.get("crf_hit_rate")
         hit_text = "n/a" if hit is None else f"{hit * 100:.0f}%"
+        targets = ",".join(f"{t:g}" for t in self.training_targets)
         return (
-            f"target {self.target:g} [{self.encoder}]  "
+            f"encoder {self.encoder}  targets [{targets}]  "
             f"train={self.n_train} val={self.n_val}  "
             f"crf MAE={m.get('crf_mae', float('nan')):.2f} "
             f"R2={m.get('crf_r2', float('nan')):.2f}  "
@@ -223,17 +224,20 @@ def _evaluate(
     return metrics
 
 
-def train_target(
-    rows: list[dict[str, str]], target: float, config: Config, models_root: str | Path
+def train_encoder(
+    rows: list[dict[str, str]],
+    config: Config,
+    models_root: str | Path,
 ) -> TrainReport:
-    """Train and save one bundle."""
-    X, y, kept = to_matrices(rows, target)
+    """Train and save one unified bundle for the configured encoder."""
+    targets_seen = training_targets(rows)
+    X, y, kept = to_matrices(rows, include_vmaf_target=True)
 
     if X.shape[0] < config.model.min_training_rows:
         raise ModelError(
-            f"only {X.shape[0]} feasible row(s) for target {target:g}; need at least "
+            f"only {X.shape[0]} feasible row(s); need at least "
             f"{config.model.min_training_rows}. Add source videos to the dev corpus, "
-            "or lower the target (or model.min_training_rows for a smoke run)."
+            "or lower model.min_training_rows for a smoke run."
         )
 
     groups = group_labels(kept)
@@ -246,8 +250,11 @@ def train_target(
     y_val = {name: y[name][val_idx] for name in LABEL_NAMES}
 
     log.info(
-        "target %g: training on %d row(s) from %d source(s), validating on %d",
-        target, len(train_idx), len(np.unique(groups[train_idx])), len(val_idx),
+        "encoder %s: training on %d row(s) across targets %s, validating on %d",
+        config.encoder.name,
+        len(train_idx),
+        [f"{t:g}" for t in targets_seen],
+        len(val_idx),
     )
 
     started = time.monotonic()
@@ -258,6 +265,7 @@ def train_target(
     metrics["fit_seconds"] = round(time.monotonic() - started, 2)
     metrics["crf_quantile"] = config.model.crf_quantile
     metrics["estimator"] = config.model.estimator
+    metrics["training_targets"] = targets_seen
 
     # Refit on everything once the metrics are recorded: the held-out rows are scarce
     # and valuable, and the metrics above already describe generalisation honestly.
@@ -268,17 +276,17 @@ def train_target(
     metadata = BundleMetadata(
         schema_version=SCHEMA_VERSION,
         encoder=config.encoder.name,
-        target=target,
-        feature_names=list(FEATURE_NAMES),
+        feature_names=list(MODEL_FEATURE_NAMES),
         label_names=list(LABEL_NAMES),
         n_train=int(X.shape[0]),
         n_val=int(len(val_idx)),
+        training_targets=targets_seen,
         metrics=metrics,
         # Recorded so production can tell when an input is outside anything the model
         # has evidence about -- see ModelBundle.out_of_domain.
         feature_ranges={
             name: [float(X[:, i].min()), float(X[:, i].max())]
-            for i, name in enumerate(FEATURE_NAMES)
+            for i, name in enumerate(MODEL_FEATURE_NAMES)
         },
         training_sources=sorted({str(g) for g in groups}),
         config={
@@ -298,14 +306,12 @@ def train_target(
         },
     )
 
-    from .bundle import bundle_dir  # local import: keeps the module import graph flat
-
-    directory = bundle_dir(models_root, config.encoder.name, target)
+    directory = bundle_dir(models_root, config.encoder.name)
     ModelBundle(estimators=final_estimators, metadata=metadata).save(directory)
 
     report = TrainReport(
-        target=target,
         encoder=config.encoder.name,
+        training_targets=targets_seen,
         n_train=int(X.shape[0]),
         n_val=int(len(val_idx)),
         metrics=metrics,
@@ -318,16 +324,5 @@ def train_target(
 def train_all(
     rows: list[dict[str, str]], config: Config, models_root: str | Path
 ) -> list[TrainReport]:
-    """Train one bundle per configured target. Failures are reported, not fatal."""
-    reports: list[TrainReport] = []
-    for target in config.search.targets:
-        try:
-            reports.append(train_target(rows, target, config, models_root))
-        except ModelError as exc:
-            log.error("training failed for target %g: %s", target, exc)
-    if not reports:
-        raise ModelError(
-            "no models could be trained. See the errors above; the usual cause is too "
-            "few feasible segments in the dev corpus."
-        )
-    return reports
+    """Train one unified bundle for the configured encoder."""
+    return [train_encoder(rows, config, models_root)]

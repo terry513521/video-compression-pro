@@ -231,12 +231,6 @@ def plan_segments(
     encoder = get_encoder(config.encoder.name)
     bundle = find_bundle(config.paths.models_dir, config.encoder.name, target)
 
-    if abs(bundle.metadata.target - target) > 1e-6:  # pragma: no cover - defensive
-        raise VidoptError(
-            f"bundle target mismatch: asked for {target:g}, bundle says "
-            f"{bundle.metadata.target:g}"
-        )
-
     payloads = [
         {
             "index": index,
@@ -273,14 +267,14 @@ def plan_segments(
     ]
 
     matrix = np.vstack(vectors) if vectors else np.empty((0, len(FEATURE_NAMES)))
-    predictions = bundle.predict(matrix)
+    predictions = bundle.predict(matrix, vmaf_target=target)
 
     plans: list[SegmentPlan] = []
     off_domain: dict[str, tuple[float, float]] = {}
     for segment, info, vector, params in zip(
         segments, infos, vectors, predictions, strict=True
     ):
-        for name, _value, low, high in bundle.out_of_domain(vector):
+        for name, _value, low, high in bundle.out_of_domain(vector, vmaf_target=target):
             off_domain[name] = (low, high)
         clamped = encoder.space.clamp(params)
         log.info(

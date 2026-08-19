@@ -1,0 +1,366 @@
+Metadata-Version: 2.4
+Name: vidopt
+Version: 1.0.0
+Summary: Scene-adaptive video compression with learned encoder parameters
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy==2.1.3
+Requires-Dist: scipy==1.14.1
+Requires-Dist: scikit-learn==1.5.2
+Requires-Dist: joblib==1.4.2
+Requires-Dist: opencv-python-headless==4.10.0.84
+Requires-Dist: scenedetect==0.6.5
+Requires-Dist: PyYAML==6.0.2
+Provides-Extra: dev
+Requires-Dist: pytest==8.3.3; extra == "dev"
+
+# vidopt
+
+Scene-adaptive video compression with learned encoder parameters.
+
+`vidopt` compresses video by treating every scene separately: it splits the input at
+scene cuts, measures what each segment looks like, and predicts the ffmpeg settings that
+hit a target VMAF with the smallest possible file. A slow, offline **dev mode** searches
+for those settings by direct measurement and trains a model; a fast **production mode**
+applies the model with no measurement at all.
+
+Runs on **Windows, Linux and macOS**. No Docker, no make — Python and ffmpeg.
+
+**[LINUX.md](LINUX.md) — Linux CPU: install.sh, corpus download, train, compress.**
+**[OFFLINE_GUIDE.md](OFFLINE_GUIDE.md) — Windows offline: pack, extract, train, compress, repair.**
+**[REPAIR.txt](REPAIR.txt) — short checklist if files are damaged.**
+**[USAGE.md](USAGE.md) — the step-by-step guide: install, dev mode, production mode.**
+**[HANDOFF.md](HANDOFF.md) — start here if you are picking this up on a new machine.**
+
+### Linux (CPU-only)
+
+On a machine with no NVIDIA GPU (this is the supported CPU path):
+
+```bash
+./install.sh
+python scripts/download_corpus.py
+./vidopt.sh doctor --config cpu
+./vidopt.sh dev video/corpus --config cpu --encoder libx265 --cpu-workers 0
+./vidopt.sh compress in.mp4 -o out/out.mp4 --target 89 --encoder libx265 --verify
+```
+
+`install.sh` creates `.venv`, fetches a **libvmaf** ffmpeg into `vendor/ffmpeg/`, and
+installs vidopt. `scripts/download_corpus.py` fills `video/corpus/` with mixed free
+clips (animation, live action, talking heads, high motion, dark/grain, graphics, …).
+
+`--cpu-workers 0` sizes the pool from core count. Do not use NVENC on a CPU-only box.
+
+### Offline production package (Windows)
+
+Self-contained: **no system Python or ffmpeg required** on the offline PC.
+
+**Build & upload (this machine):**
+```bat
+scripts\prepare_offline_bundle.bat
+install.bat
+scripts\pack_production.bat          # -> dist\vidopt-offline-windows-x64.zip
+```
+
+**On the download PC (no install step):**
+```bat
+vidopt.bat doctor
+vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4
+vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libx265 --verify
+```
+
+Put training / input videos in `video\corpus\`. See [OFFLINE_GUIDE.md](OFFLINE_GUIDE.md)
+and `START_HERE.txt` inside the zip.
+
+### Scalability & encoder (train / compress)
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--encoder NAME` | `libx265` | Codec: `libx265`, `libx264`, `libsvtav1`, `hevc_nvenc`, `av1_nvenc`, `h264_nvenc` |
+| `--cpu-workers N` | `4` | Parallel CPU encodes (`0` = auto from cores) |
+| `--gpu-workers N` | `0` | Parallel GPU encodes (`0` = CPU-only) |
+
+```bat
+rem CPU train / compress
+vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4
+vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libx265 --verify
+
+rem GPU (NVENC) — raise --gpu-workers to match devices
+vidopt.bat dev video\corpus --encoder hevc_nvenc --gpu-workers 1 --cpu-workers 4
+vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder hevc_nvenc --gpu-workers 1
+```
+
+Train and compress with the **same** `--encoder` — models live under `models\<encoder>\`.
+
+### Repair (offline — damaged environment)
+
+The production PC is **offline**. When the runtime breaks, repair from the
+**installable pieces already in the package** — not from the internet.
+
+**What ships for repair:**
+
+| Installable | Path |
+|---|---|
+| Portable Python (zip) | `vendor\installers\python-3.11.9-embed-amd64.zip` |
+| Official Python installer | `vendor\installers\python-3.11.9-amd64.exe` |
+| get-pip | `vendor\installers\get-pip.py` |
+| All Python libraries | `vendor\wheelhouse\*.whl` |
+| ffmpeg + ffprobe (libvmaf) | `vendor\ffmpeg\bin\` |
+| Application source | `src\vidopt\` |
+
+**One-command repair** (rebuilds Python if needed, reinstalls every library, recopies vidopt):
+
+```bat
+install.bat
+vidopt.bat doctor
+```
+
+`install.bat` does this **without network**:
+
+1. If `vendor\python\python.exe` is missing/broken → extract the embed zip  
+   (or run the official `.exe` into `vendor\python\`)
+2. Bootstrap pip from `get-pip.py` + `vendor\wheelhouse`
+3. `pip install --no-index` all libraries from `vendor\wheelhouse`
+4. Copy `src\vidopt\` into the bundled Python
+5. Run `vidopt doctor` using bundled ffmpeg
+
+| Symptom | Fix |
+|---|---|
+| Libraries / `ImportError` | `install.bat` |
+| Python broken or deleted | `install.bat` (rebuilds from `vendor\installers\`) |
+| ffmpeg / libvmaf fails | Restore `vendor\ffmpeg\bin\ffmpeg.exe` + `ffprobe.exe`, then `install.bat` |
+| Missing models | Restore `models\` or re-train (`--encoder` must match) |
+| Empty `wheelhouse` or missing installers | Package incomplete — get a fresh production zip |
+
+Short checklist: **[REPAIR.txt](REPAIR.txt)**. Full guide:
+[OFFLINE_GUIDE.md §13](OFFLINE_GUIDE.md#13-repair-damaged-or-missing-files).
+
+- [DESIGN.md](DESIGN.md) — architecture and the reasoning behind each decision
+- [REFERENCE_ANALYSIS.md](REFERENCE_ANALYSIS.md) — analysis of the reference projects
+
+---
+
+## Install
+
+```bash
+git clone <repo-url> vidopt
+cd vidopt
+
+python -m venv .venv
+# Windows PowerShell:  .venv\Scripts\Activate.ps1
+# Windows cmd:         .venv\Scripts\activate.bat
+# Linux / macOS:       source .venv/bin/activate
+
+python scripts/setup.py
+
+# Linux helper (venv + ffmpeg + doctor --config cpu)
+./install.sh
+```
+
+`scripts/setup.py` downloads an ffmpeg build **that includes `libvmaf`** into `vendor/`
+and installs the package. This matters: nearly every prepackaged ffmpeg — winget, choco,
+Homebrew, apt — is built *without* libvmaf, and then quality cannot be measured at all.
+
+Then check it:
+
+```bash
+vidopt doctor                      # what was found, and can it run
+python scripts/setup.py --verify   # real encode + real VMAF measurement
+```
+
+Already have an ffmpeg with libvmaf? Point at it and skip the download:
+
+```
+set VIDOPT_FFMPEG_DIR=C:\tools\ffmpeg\bin      # Windows
+export VIDOPT_FFMPEG_DIR=/opt/ffmpeg/bin       # Linux/macOS
+python scripts/setup.py --skip-ffmpeg
+```
+
+---
+
+## How it works
+
+### Dev mode — measure, then learn
+
+```
+corpus ──► segment by scene ──► extract features ──► search parameters ──► train
+             (PySceneDetect)      (18 per segment)     (per VMAF target)    (per target)
+```
+
+For every segment and every VMAF target (85, 89, 93 by default), the search answers one
+question by direct measurement:
+
+> What `(crf, aq-mode, aq-strength)` gives the smallest file while still reaching this VMAF?
+
+Two stages: a Sobol sweep to find the best adaptive-quantisation settings for this
+content, then a bisection on CRF against the target. Every encode-and-measure trial is
+cached, so the three targets share their work and an interrupted run resumes for free.
+
+### Production mode — predict, then encode
+
+```
+input ──► segment ──► features ──► predict ──► encode in parallel ──► concat ──► output
+```
+
+No search, no VMAF measurement. Each segment gets its own parameters, segments encode
+concurrently, and the results are concatenated with `-c copy` — so the bits the search
+chose survive into the final file untouched.
+
+---
+
+## Quick start
+
+Linux (CPU):
+
+```bash
+./install.sh
+python scripts/download_corpus.py
+./vidopt.sh doctor --config cpu
+./vidopt.sh dev video/corpus --config cpu --encoder libx265 --cpu-workers 0
+./vidopt.sh inspect
+./vidopt.sh compress in.mp4 -o out.mp4 --target 89 --encoder libx265 --verify
+```
+
+Windows:
+
+```bat
+vidopt.bat doctor
+vidopt.bat dev path\to\corpus --encoder libx265 --cpu-workers 4
+vidopt.bat inspect
+vidopt.bat compress in.mp4 -o out.mp4 --target 89 --encoder libx265 --verify
+```
+
+Fast plumbing check (~10 min, not for deployment):
+
+```bat
+vidopt.bat dev path\to\corpus --limit 2 --config quick
+```
+
+---
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `vidopt doctor` | Toolchain report; tests encoders by really encoding a frame |
+| `vidopt.bat` / `vidopt` | Same CLI via bundled or installed Python |
+| `vidopt.bat` `dev CORPUS...` | Phase 1: segment, search, train |
+| `vidopt train DATASET` | Re-train from an existing dataset without re-searching |
+| `vidopt compress IN -o OUT` | Phase 2: compress with predicted parameters |
+| `vidopt inspect` | Trained models and their metrics |
+| `vidopt score --vmaf V --ratio R` | Evaluate the objective function directly |
+| `vidopt config [--list-overlays]` | Effective configuration / shipped overlays |
+| `install.bat` | Offline install **or repair** (wheels + vidopt into bundled Python) |
+
+Common flags: `--encoder`, `--cpu-workers`, `--gpu-workers`, `--config NAME|PATH`,
+`--set key.path=value`, `--log-level`.
+
+Full details in [USAGE.md](USAGE.md) and [OFFLINE_GUIDE.md](OFFLINE_GUIDE.md).
+
+---
+
+## Production input
+
+Handles **any resolution and any duration**, and preserves what matters:
+
+| Property | Behaviour |
+|---|---|
+| Audio, subtitles, chapters | Copied from the original, bit-exact, never re-encoded |
+| Bit depth | 10/12-bit stays 10/12-bit when the encoder supports it |
+| Chroma subsampling | 4:2:2 and 4:4:4 preserved when supported |
+| Pixel aspect ratio | Preserved — anamorphic content stays correct |
+| Duration, frame count | Exact |
+
+If the input falls outside what the model was trained on — a 4K file against a
+720p-trained model — it says so rather than silently extrapolating:
+
+```
+WARNING this input is outside the model's training domain: height (trained 720..720),
+        width (trained 1280..1280). Predictions are extrapolations and may miss the
+        VMAF target — verify with --verify, and re-run `vidopt dev` on a corpus that
+        includes content like this.
+```
+
+Long inputs are bounded by construction: segments are capped, encoded across the worker
+pool, and each cut segment is deleted as soon as its encode finishes, so peak disk stays
+near 1x the input.
+
+---
+
+## Configuration
+
+```
+built-in defaults  ->  --config overlay(s)  ->  --set dotted.key=value
+```
+
+Overlays ship inside the package, so `--config gpu` works from any directory:
+
+| Overlay | For |
+|---|---|
+| `cpu` | CPU-only: `libx265`, no CUDA |
+| `gpu` | `hevc_nvenc` + `libvmaf_cuda` |
+| `quick` | Fast smoke test — low fidelity, not for deployment |
+
+`--config` also takes a path to your own YAML. Unknown keys are errors, not silent
+no-ops. `vidopt config --list-overlays` shows where the shipped files live.
+
+### The knob worth understanding
+
+`model.crf_quantile` (default `0.15`). The objective scores **zero** below `target - 5`,
+so predicting too aggressively costs far more than predicting too conservatively. The CRF
+model is fit with quantile loss below the median to build in margin. Lower it if
+`--verify` reports MISSED; raise it toward 0.5 for maximum compression and more risk.
+
+---
+
+## What the numbers mean
+
+`--verify` reports:
+
+```
+size       32.3 MB -> 8.3 MB  (3.87x)
+vmaf       88.38  [MISSED]
+score      0.0282
+```
+
+- **vmaf** — harmonic mean of per-frame VMAF using `vmaf_v0.6.1neg`. Harmonic mean
+  weights bad frames heavily, which is right when the requirement is a quality *floor*.
+- **score** — the objective in `[0, 1]`: 70 % compression, 30 % quality, zero below
+  `target - 5` or if the file barely shrank.
+
+In `vidopt inspect`, watch the **hit rate**: the fraction of held-out segments whose
+predicted parameters would have met the target. Excellent R² with a 60 % hit rate is a
+bad model here, because missing the target scores zero.
+
+---
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest -q                        # unit tests (fast)
+pytest -q --run-integration      # + tests that run real ffmpeg
+ruff check src tests             # lint
+```
+
+```
+src/vidopt/
+  cli.py           argparse entry point
+  config.py        dataclass schema, YAML layering, validation
+  configs/*.yaml   shipped configuration (installed as package data)
+  scoring.py       the objective function
+  errors.py        typed exception hierarchy
+  ffmpeg/          binary discovery, capability probing, ffprobe, subprocess
+  media/           scene segmentation, lossless concat
+  features/        per-segment content analysis
+  encoding/        encoder registry, parameter space, pixel-format resolution
+  quality/         VMAF measurement
+  search/          samplers, trial cache, optimizer
+  modeling/        dataset, training, versioned model bundles
+  pipeline/        dev and production orchestration
+```
+
+Adding an encoder is one `Encoder` subclass in
+[src/vidopt/encoding/encoders.py](src/vidopt/encoding/encoders.py) declaring its
+`ParamSpace` and translating `(crf, aq_mode, aq_strength)` into its own flags. Nothing
+else changes.

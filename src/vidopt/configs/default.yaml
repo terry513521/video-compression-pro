@@ -86,14 +86,29 @@ vmaf:
 search:
   targets: [85.0, 89.0, 93.0]
 
-  # 'sobol' is a low-discrepancy sequence: at these budgets (tens of trials) it covers
-  # the space far more evenly than uniform 'random'. 'grid' is also available.
+  # How (crf, AQ) points are proposed before the 1-D CRF solve.
+  #   aq_then_crf  enumerate AQ, screen at a few CRFs, then CRF-solve the best (default)
+  #   coordinate   screen AQ, then walk 4-neighbours while re-solving CRF
+  #   sample       3-D design (sampler= sobol|lhs|halton|random|grid)
+  #   bayes        Gaussian-process BO (P(VMAF≥target) × CRF)
+  #   tpe          Tree-structured Parzen Estimator
+  #   cmaes        diagonal CMA-style evolution strategy
+  strategy: aq_then_crf
   sampler: sobol
+  # 1-D CRF at fixed AQ: bisect (secant+bisection), brent, or golden
+  crf_solver: bisect
 
-  # Stage A: exploration trials per segment, shared across all targets.
+  # Stage-A budget. Structured strategies treat this as a cap (about 2x is allowed).
   n_explore: 12
-  # Stage B: how many of the best AQ settings get a CRF bisection, per target.
+  # Initial design for bayes/tpe/cmaes. 0 => max(4, n_explore/2).
+  n_init: 0
+  # Stage B: how many of the best AQ settings get a 1-D CRF solve (aq_then_crf / sample).
   n_refine_configs: 2
+  # Float AQ-strength grid. Integer-strength encoders (libsvtav1) ignore this.
+  n_strength_steps: 5
+  # CRF probes per AQ during screening.
+  n_screen_crfs: 2
+  max_coordinate_rounds: 4
   max_bisect_iters: 6
   # Bisection stops once the CRF bracket is narrower than this.
   crf_tolerance: 0.5
