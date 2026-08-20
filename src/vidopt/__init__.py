@@ -2,7 +2,7 @@
 
 Two workflows:
 
-* **dev mode** (``vidopt dev``): segment a corpus by scene, extract per-segment
+* **train mode** (``vidopt train``): segment a corpus by scene, extract per-segment
   features, search for the encoder parameters that minimise size subject to a VMAF
   target, and train a model per target.
 * **production mode** (``vidopt compress``): segment an input, predict parameters per

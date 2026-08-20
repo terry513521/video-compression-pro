@@ -1,6 +1,6 @@
 # GPU overlay: a few GPUs, many CPUs — the stated deployment target.
 #
-#   vidopt dev ../video/4k --config configs/gpu.yaml --set jobs.gpu_workers=3
+#   vidopt train ../video/4k --config configs/gpu.yaml --level 2 --set jobs.gpu_workers=3 --resume
 #
 # NVENC encodes on the GPU and libvmaf_cuda measures on the GPU, so the search loop
 # runs almost entirely on the device. Set jobs.gpu_workers to roughly the number of

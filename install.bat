@@ -14,15 +14,15 @@ rem      vendor\wheelhouse\*.whl                           (all Python libraries
 rem      vendor\ffmpeg\bin\ffmpeg.exe + ffprobe.exe        (libvmaf build)
 rem      src\vidopt\                                       (application source)
 rem
-rem  Normal use: extract the zip and run vidopt.bat (already installed).
-rem  When the environment is damaged: run this script.
-rem
-rem      install.bat
+rem  First-time setup after extracting a production / project zip:
+rem      install.bat     (extracts vendor-windows-x64.zip, installs vidopt)
+rem  Repair later if files are damaged: run install.bat again.
 rem ============================================================================
 
 cd /d "%~dp0"
 set "ROOT=%CD%"
 set "VENDOR=%ROOT%\vendor"
+set "VENDOR_ZIP=%ROOT%\vendor-windows-x64.zip"
 set "PY_HOME=%VENDOR%\python"
 set "PY=%PY_HOME%\python.exe"
 set "FFMPEG_BIN=%VENDOR%\ffmpeg\bin"
@@ -39,6 +39,25 @@ echo  vidopt offline install / repair
 echo  root: %ROOT%
 echo ============================================================
 echo.
+
+rem ---- extract bundled vendor archive (first run) ---------------------------
+if exist "%VENDOR_ZIP%" (
+  if not exist "%PY%" (
+    echo [0/3] Extracting bundled vendor archive ...
+    echo       %VENDOR_ZIP%
+    if exist "%VENDOR%" rmdir /s /q "%VENDOR%"
+    powershell -NoProfile -Command "Expand-Archive -Path '%VENDOR_ZIP%' -DestinationPath '%ROOT%' -Force"
+    if errorlevel 1 (
+      echo ERROR: failed to extract %VENDOR_ZIP%
+      exit /b 1
+    )
+    if not exist "%PY%" (
+      echo ERROR: %PY% missing after extracting vendor archive
+      exit /b 1
+    )
+    echo       vendor/ ready
+  )
+)
 
 rem ---- wheelhouse (libraries) ----------------------------------------------
 if not exist "%WHEELHOUSE%\" goto :missing_wheelhouse
@@ -135,8 +154,8 @@ echo  Install / repair complete — still fully offline.
 echo ============================================================
 echo.
 echo    vidopt.bat doctor
-echo    vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4
-echo    vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libx265 --verify
+echo    vidopt.bat train video\corpus --encoder libsvtav1 --level 2 --cpu-workers 0 --resume
+echo    vidopt.bat compress in.mp4 -o out\out.mp4 --encoder libsvtav1 --level 2 --verify
 echo.
 echo  Repair again anytime with:  install.bat
 echo  Checklist: REPAIR.txt
@@ -193,8 +212,13 @@ echo The offline package is incomplete. Re-download the production zip.
 exit /b 1
 
 :missing_wheelhouse
-echo ERROR: vendor\wheelhouse is missing or empty.
-echo Offline repair needs the .whl libraries that shipped in the package.
+if exist "%VENDOR_ZIP%" (
+  echo ERROR: vendor\wheelhouse is missing or empty.
+  echo Run install.bat to extract %VENDOR_ZIP% first.
+) else (
+  echo ERROR: vendor\wheelhouse is missing or empty.
+  echo Offline repair needs the .whl libraries that shipped in the package.
+)
 echo Re-extract / re-download the production zip.
 exit /b 1
 

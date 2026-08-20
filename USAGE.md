@@ -1,16 +1,17 @@
-# vidopt — User Guide
+# vidopt — User Guide (Windows)
 
-Step-by-step instructions for installing the environment, running dev mode, and running
-production mode.
+Step-by-step instructions for installing the environment, running train mode, and running
+compress mode on **Windows**. CLI only — no web or desktop UI.
 
 - [README.md](README.md) — overview and reference
-- [LINUX.md](LINUX.md) — Linux CPU install, copy corpus, train, compress
+- [SYSTEM_GUIDE.md](SYSTEM_GUIDE.md) — architecture, search, models, offline deploy (deep dive)
+- [OFFLINE_GUIDE.md](OFFLINE_GUIDE.md) — offline production zip workflow
+- [START_HERE.txt](START_HERE.txt) — shortest quick start
 - [DESIGN.md](DESIGN.md) — how it works and why
 - [REFERENCE_ANALYSIS.md](REFERENCE_ANALYSIS.md) — analysis of the reference projects
 
-Runs on **Windows, Linux and macOS**. No Docker, no bash, no make — just Python and
-ffmpeg. Commands are shown for PowerShell where they differ; everything else is
-identical across platforms.
+No Docker, no make — bundled or system Python plus ffmpeg. Use `vidopt.bat` in the
+production zip, or `vidopt` / `python -m vidopt` from a development install.
 
 ---
 
@@ -24,11 +25,11 @@ identical across platforms.
    - [1.5 Offline / air-gapped machines](#15-offline--air-gapped-machines)
    - [1.6 Where things live](#16-where-things-live)
    - [1.7 Windows notes](#17-windows-notes)
-2. [Dev mode](#2-dev-mode)
+2. [Train mode](#2-train-mode)
    - [2.4 Search algorithms](#24-search-algorithms)
    - [2.9 Offline training workflow](#29-offline-training-workflow)
    - [2.10 Optional: algorithm matrix](#210-optional-algorithm-matrix)
-3. [Production mode](#3-production-mode)
+3. [Compress mode](#3-compress-mode)
    - [3.6 Deploying trained models (offline production)](#36-deploying-trained-models-offline-production)
 4. [Tuning](#4-tuning)
 5. [Operations](#5-operations)
@@ -40,63 +41,43 @@ identical across platforms.
 
 ## 1.1 What you need
 
-| Requirement | Windows | Linux / macOS |
-|---|---|---|
-| Python 3.10+ | [python.org](https://www.python.org/downloads/) — tick "Add to PATH" | `apt install python3 python3-venv` / `brew install python` |
-| Git | [git-scm.com](https://git-scm.com/) | `apt install git` / preinstalled |
-| Disk | ~1 GB, plus working space (see [§5.2](#52-disk-usage)) | same |
-| NVIDIA GPU | **Optional.** CPU-only is fully supported | same |
+| Requirement | Notes |
+|---|---|
+| Windows 10/11 x64 | Production zip ships its own Python + ffmpeg |
+| Python 3.10+ | Only for development install from source ([python.org](https://www.python.org/downloads/) — tick "Add to PATH") |
+| Disk | ~1 GB for tools, plus working space (see [§5.2](#52-disk-usage)) |
+| NVIDIA GPU | **Optional.** CPU-only is fully supported |
 
-Not needed: Docker, bash, make, admin rights, a compiler, or a preinstalled ffmpeg.
+Not needed: Docker, admin rights, a compiler, or a preinstalled ffmpeg (in the production zip).
 
 ## 1.2 Install
 
-```bash
-git clone <repo-url> vidopt
-cd vidopt
-```
+### Production zip (offline, recommended)
 
-Create and activate a virtual environment:
-
-```powershell
-# Windows — PowerShell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-```
+Extract the package. Run `install.bat` only if repair is needed. Then:
 
 ```bat
-REM Windows — cmd.exe
-python -m venv .venv
-.venv\Scripts\activate.bat
+vidopt.bat doctor
 ```
 
-```bash
-# Linux / macOS
-python3 -m venv .venv
-source .venv/bin/activate
+See [OFFLINE_GUIDE.md](OFFLINE_GUIDE.md) and [START_HERE.txt](START_HERE.txt).
+
+### Development install (connected machine)
+
+```powershell
+git clone <repo-url> vidopt
+cd vidopt
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python scripts/setup.py
 ```
 
 > **PowerShell execution policy.** If `Activate.ps1` is blocked, run once:
 > `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
-> Or skip activation entirely and call `.venv\Scripts\vidopt.exe` directly.
+> Or call `.venv\Scripts\vidopt.exe` directly without activating.
 
-Then run the setup script:
-
-```bash
-python scripts/setup.py
-```
-
-On Linux you can do the same with one script (creates `.venv`, fetches libvmaf ffmpeg,
-runs `vidopt doctor --config cpu`):
-
-```bash
-./install.sh
-./vidopt.sh doctor --config cpu
-# copy training videos into video/corpus/  (USB, disk, another machine)
-```
-
-It downloads an ffmpeg build for your platform into `vendor/ffmpeg/`, checks that it has
-`libvmaf` and the required encoders, and installs vidopt with its dependencies.
+`scripts/setup.py` downloads an ffmpeg build with `libvmaf` into `vendor\ffmpeg\`, checks
+encoders, and installs vidopt.
 
 **Why it downloads its own ffmpeg.** Almost every prepackaged ffmpeg — winget, choco,
 scoop, Homebrew, apt — is built *without* `libvmaf`. Without it the pipeline cannot
@@ -119,13 +100,6 @@ It must have been built with `--enable-libvmaf`. Check with
 ```powershell
 $env:VIDOPT_FFMPEG_DIR = "C:\tools\ffmpeg\bin"     # PowerShell, this session
 setx VIDOPT_FFMPEG_DIR "C:\tools\ffmpeg\bin"       # persist it
-```
-
-```bash
-export VIDOPT_FFMPEG_DIR=/opt/ffmpeg/bin            # Linux / macOS
-```
-
-```bash
 python scripts/setup.py --skip-ffmpeg
 ```
 
@@ -180,7 +154,7 @@ pip download -d vendor/wheelhouse `
   Click platformdirs tqdm threadpoolctl
 ```
 
-Copy the whole project directory across (including `vendor/`), then on the offline machine:
+Copy the whole project directory across (including `vendor\`), then on the offline machine:
 
 ```powershell
 python -m venv .venv
@@ -188,41 +162,30 @@ python -m venv .venv
 python scripts/setup.py --skip-ffmpeg
 ```
 
-`setup.py` uses `vendor/wheelhouse` with `--no-index` automatically when it is present,
-so nothing reaches the network.
+Or use the production zip with `install.bat` — see [OFFLINE_GUIDE.md](OFFLINE_GUIDE.md).
 
 ## 1.6 Where things live
 
 ```
-vidopt/
-├── .venv/                  your virtual environment
-├── vendor/ffmpeg/bin/      ffmpeg + ffprobe (downloaded by setup.py)
-├── models/<encoder>/target_<T>/    trained model bundles
-├── runs/                   working artifacts (datasets, caches, segments)
-├── src/vidopt/             the package
-│   └── configs/*.yaml      shipped configuration
-├── scripts/setup.py        cross-platform environment setup
-└── tests/
+vidopt\
+├── vendor\python\          bundled Python (production zip)
+├── vendor\ffmpeg\bin\      ffmpeg + ffprobe (libvmaf)
+├── models\<encoder>\target_<T>\    trained model bundles
+├── runs\                   working artifacts (datasets, caches, segments)
+├── src\vidopt\             the package
+│   └── configs\*.yaml      shipped configuration
+├── scripts\setup.py        environment setup
+├── vidopt.bat              launcher (production zip)
+└── install.bat             offline install / repair
 ```
-
-`vendor/`, `.venv/`, `runs/` and `models/` are all git-ignored — they are rebuilt, not
-committed.
-
-ffmpeg is discovered in this order, first match wins:
-
-1. `ffmpeg.bin_dir` in the config
-2. `$VIDOPT_FFMPEG_DIR` / `%VIDOPT_FFMPEG_DIR%`
-3. the active environment's script directory (`Scripts\` on Windows, `bin/` elsewhere)
-4. `vendor/ffmpeg/bin`
-5. `PATH`
 
 ## 1.7 Windows notes
 
 - **Long paths.** Deeply nested working directories can exceed the 260-character limit.
   Either keep the project near the drive root (`C:\vidopt`) or enable long paths:
   `New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force`
-- **Antivirus.** Real-time scanning of thousands of short-lived segment files slows dev
-  mode considerably. Consider excluding the `runs/` directory.
+- **Antivirus.** Real-time scanning of thousands of short-lived segment files slows train
+  mode considerably. Consider excluding the `runs\` directory.
 - **Paths in commands.** Forward slashes work everywhere:
   `vidopt compress C:/videos/in.mp4 -o C:/videos/out.mp4`. If you use backslashes, quote
   the path.
@@ -231,13 +194,13 @@ ffmpeg is discovered in this order, first match wins:
 
 ---
 
-# 2. Dev mode
+# 2. Train mode
 
-Dev mode is the expensive, run-it-once step: it **measures** the best encoder parameters
-for many scenes and trains a model to predict them. Production mode then never has to
+Train mode is the expensive, run-it-once step: it **measures** the best encoder parameters
+for many scenes and trains a model to predict them. Compress mode then never has to
 measure anything.
 
-Run it once per (corpus, encoder). It takes hours — that is expected, it is encoding and
+Run it once per (corpus, encoder, level). It takes hours — that is expected, it is encoding and
 scoring thousands of variants.
 
 ## 2.1 What it does
@@ -251,8 +214,8 @@ measurement:
 
 > Which `(crf, aq-mode, aq-strength)` gives the smallest file that still reaches this VMAF?
 
-How those three knobs are searched is `search.strategy` (default **`aq_then_crf`**). See
-[§2.4 Search algorithms](#24-search-algorithms).
+How those three knobs are searched is `search.strategy`. CLI **`vidopt train` defaults
+to `boundary`**. See [§2.4 Search algorithms](#24-search-algorithms).
 
 ## 2.2 Preparing a corpus
 
@@ -263,21 +226,13 @@ compress 4K, train on 4K.
 **Copy** the videos onto the machine (USB, external disk, or another folder). There is
 no network step:
 
-```bash
-# Linux / macOS
-mkdir -p video/corpus
-cp /media/usb/*.mp4 video/corpus/
-# or a whole tree:
-cp -a /path/to/your_videos/. video/corpus/
-```
-
 ```powershell
-# Windows
 New-Item -ItemType Directory -Force -Path video\corpus
 Copy-Item D:\my_videos\*.mp4 video\corpus\ -Force
+robocopy D:\corpus video\corpus /E
 ```
 
-- Point `vidopt dev` at files, directories, or both. Directories recurse.
+- Point `vidopt train` at files, directories, or both. Directories recurse.
 - Recognised: `.mp4 .mkv .mov .webm .y4m .avi .m4v .ts`
 - Aim for **10+ source videos** spanning your real content: high and low motion, grain,
   flat animation, dark scenes, screen content.
@@ -287,13 +242,13 @@ Copy-Item D:\my_videos\*.mp4 video\corpus\ -Force
 
 ```bash
 # Full run on the 4K corpus, CPU encoder
-vidopt dev path/to/corpus --config cpu
+vidopt train path/to/corpus --config cpu --level 2 --resume
 
 # GPU box: NVENC encoding + CUDA VMAF
-vidopt dev path/to/corpus --config gpu --set jobs.gpu_workers=4
+vidopt train path/to/corpus --config gpu --level 2 --set jobs.gpu_workers=4 --resume
 
 # Quick plumbing check (~10 min, NOT for deployment)
-vidopt dev path/to/corpus --limit 2 --config quick
+vidopt train path/to/corpus --limit 2 --config quick --level 2
 ```
 
 Useful options:
@@ -301,7 +256,7 @@ Useful options:
 | Option | Effect |
 |---|---|
 | `--limit N` | Use at most N source videos |
-| `--no-train` | Build the dataset, skip training (train later with `vidopt train`) |
+| `--level N` | Quality level shorthand: `1=85`, `2=89`, `3=93` |
 | `--set search.strategy=coordinate` | AQ neighbour walk after the AQ screen |
 | `--set search.strategy=bayes` | Gaussian-process Bayesian optimisation |
 | `--set search.strategy=tpe` | Tree-structured Parzen Estimator |
@@ -313,7 +268,7 @@ Useful options:
 
 ## 2.4 Search algorithms
 
-Each trial is an encode plus a VMAF measurement. Search runs only in `vidopt dev`.
+Each trial is an encode plus a VMAF measurement. Search runs only in `vidopt train`.
 Production (`vidopt compress`) never re-searches: it predicts from the trained model.
 
 CRF is 1-D: **VMAF falls as CRF rises**, so once AQ is fixed the highest feasible CRF
@@ -337,7 +292,8 @@ targets reuse encodes.
 
 | Value | Kind | What it does |
 |---|---|---|
-| **`aq_then_crf`** (default) | Structured | Enumerate every AQ pair, screen each at a few CRFs, then 1-D CRF-solve the best |
+| **`boundary`** (CLI default) | Structured | Threshold-first AQ refinement after screening, then CRF solves |
+| **`aq_then_crf`** | Structured | Enumerate every AQ pair, screen each at a few CRFs, then 1-D CRF-solve the best |
 | **`coordinate`** | Structured | Same AQ screen, then walk 4-neighbours (mode ±1, strength ±1) and re-solve CRF |
 | **`sample`** | Space-filling | Draw `n_explore` points in 3-D with `search.sampler`, then CRF-solve the best AQ |
 | **`bayes`** | Model-based | Initial design, then a Gaussian process proposes points that look both feasible and compressible |
@@ -414,7 +370,7 @@ than `search.crf_tolerance` or after `search.max_bisect_iters` (default 6).
 
 | Goal | Setting |
 |---|---|
-| Production training (recommended) | `strategy=aq_then_crf` (default), `crf_solver=bisect` |
+| Production training (recommended) | Default CLI: `boundary`, or `aq_then_crf` via `--set` |
 | AQ settings interact (x265 float strength) | `strategy=coordinate` |
 | Compare against a 3-D design | `strategy=sample` plus `sampler=sobol` or `lhs` |
 | Surrogate model over the cube | `strategy=bayes` (optionally `sampler=lhs`, `n_init=6`) |
@@ -427,32 +383,31 @@ than `search.crf_tolerance` or after `search.max_bisect_iters` (default 6).
 
 ```bash
 # Default — enumerate AQ, then secant-bisection on CRF
-vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0
+vidopt train video/corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 --resume
 
 # Neighbour walk after the AQ screen
-vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+vidopt train video/corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 \
   --set search.strategy=coordinate
 
 # 3-D Halton design
-vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+vidopt train video/corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 \
   --set search.strategy=sample --set search.sampler=halton
 
 # Bayesian optimisation with a Latin-hypercube start, Brent CRF solve
-vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+vidopt train video/corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 \
   --set search.strategy=bayes --set search.sampler=lhs --set search.crf_solver=brent
 
 # TPE with a larger initial design
-vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+vidopt train video/corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 \
   --set search.strategy=tpe --set search.n_init=6
 
 # CMA-ES
-vidopt dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
+vidopt train video/corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 \
   --set search.strategy=cmaes
 ```
 
 Changing `search.strategy`, `search.sampler`, or `search.crf_solver` needs a new
-`vidopt dev` (or `--resume` on an unfinished run). `vidopt train` only re-fits the
-model on existing labels.
+`vidopt train` run (or `--resume` on an unfinished run).
 
 ## 2.5 Reading the output
 
@@ -480,74 +435,62 @@ high for your encoder/preset.
 ## 2.6 Artifacts
 
 ```
-runs/current/dataset.csv        one row per (segment, target) — inspect this
-runs/current/dev_summary.json   what ran, plus model metrics
-runs/cache/trials.sqlite        every encode+measure result
-models/<encoder>/target_<T>/    the trained bundles
+runs\current\dataset.csv        one row per (segment, target) — inspect this
+runs\current\search_records.jsonl   segment search checkpoints (--resume)
+runs\cache\trials.sqlite        every encode+measure result
+models\<encoder>\target_<T>\    the trained bundles
 ```
 
 ## 2.7 Interrupting and resuming
 
-Safe to interrupt with Ctrl-C. Individual encode+VMAF trials are cached in
-`runs/cache/trials.sqlite`. Finished segments are checkpointed in
-`runs/current/search_records.jsonl`.
+Safe to interrupt with Ctrl+C. Individual encode+VMAF trials are cached in
+`runs\cache\trials.sqlite`. Finished segments are checkpointed in
+`runs\<work_dir>\search_records.jsonl`.
 
-Continue the same work directory with `--resume` — it reuses existing scene cuts and
-skips segments that already completed:
+Continue with **`--resume`** and the same encoder, level, and work directory:
 
-```bash
-vidopt dev path/to/corpus --config cpu --resume
+```powershell
+vidopt train video\corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 --resume
 ```
+
+With `--resume`:
+
+1. Existing scene cuts are reused from `segments.json`.
+2. Segments already in `search_records.jsonl` for this encoder + VMAF target are skipped.
+3. Individual trials still hit the SQLite cache even for partially searched segments.
 
 Without `--resume`, search runs again for every segment (cached trials still skip
-re-encoding). Use `--resume` after a crash or Ctrl-C.
-
-## 2.8 Re-training without re-searching
-
-The search is the expensive part and is already saved. To change a model setting:
-
-```bash
-vidopt train runs/current/dataset.csv --set model.crf_quantile=0.10
-```
-
-Takes seconds.
+re-encoding). Always use `--resume` after a crash or Ctrl+C.
 
 ## 2.9 Offline training workflow
 
 Training is designed to run **without network access** after the environment is installed.
 This is the recommended path for a production deployment — one encoder, one search
-algorithm (default `aq_then_crf`), and the VMAF target(s) you will compress with.
+algorithm (CLI default **`boundary`**), and the VMAF target(s) you will compress with.
 
 ### Phase 1 — Install once (online or air-gapped)
-
-**Linux:** `./install.sh` (see [LINUX.md](LINUX.md)).
 
 **Windows offline zip:** extract the production package; run `install.bat` only if
 repair is needed (see [OFFLINE_GUIDE.md](OFFLINE_GUIDE.md)).
 
-**Air-gapped from source:** copy the whole project including `vendor/wheelhouse/` and
-`vendor/ffmpeg/`, then `python scripts/setup.py --skip-ffmpeg` on the offline machine
+**Air-gapped from source:** copy the whole project including `vendor\wheelhouse\` and
+`vendor\ffmpeg\`, then `python scripts/setup.py --skip-ffmpeg` on the offline machine
 (see [§1.5](#15-offline--air-gapped-machines)).
 
 ### Phase 2 — Copy the corpus (offline)
 
-Copy videos onto the training machine (USB, disk, rsync). They must **look like production
+Copy videos onto the training machine (USB, disk, robocopy). They must **look like production
 content** — same resolutions, motion types, grain, animation vs live action. Put them in
-`video/corpus/` (or any path you pass to `vidopt dev`).
+`video\corpus\` (or any path you pass to `vidopt train`).
 
 ### Phase 3 — Train (offline, hours)
 
 Pick **one encoder** and train with the default search unless you have a reason to change
 it (see [§2.4](#24-search-algorithms)):
 
-```bash
-# Linux — libsvtav1, VMAF 89 only, resume-safe
-./vidopt.sh dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
-  --set search.targets='[89]' --resume
-
-# Windows offline
-vidopt.bat dev video\corpus --config cpu --encoder libx265 --cpu-workers 4 `
-  --set search.targets=[89] --set paths.work_dir=runs/production --resume
+```bat
+vidopt.bat train video\corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 `
+  --set paths.work_dir=runs/production --resume
 ```
 
 What you get:
@@ -565,8 +508,8 @@ runs/cache/trials.sqlite   encode+VMAF cache (safe to keep; speeds re-runs)
 **Interrupt safely:** Ctrl-C, then re-run the **same command with `--resume`**. Finished
 segments are checkpointed in `<work_dir>/search_records.jsonl`; trials are in SQLite.
 
-**Logs:** by default, dev mode writes to `<work_dir>/logs/vidopt.log` (and
-`worker-<pid>.log` when using multiple workers). Use `--log-file PATH` to override.
+**Logs:** train mode writes to `<work_dir>\logs\vidopt.log` (and `worker-<pid>.log`
+with multiple workers). Use `--log-file PATH` to override.
 
 ### Phase 4 — Inspect before you deploy
 
@@ -578,7 +521,7 @@ Watch **hit-rate** on held-out segments (aim for 95 %+). If `--verify` often mis
 target in production, re-train with a lower `model.crf_quantile` — no re-search needed:
 
 ```bash
-vidopt train runs/production/dataset.csv --encoder libsvtav1 --set model.crf_quantile=0.10
+vidopt train video/corpus --encoder libsvtav1 --level 2 --set model.crf_quantile=0.10 --resume
 ```
 
 ### Phase 5 — Compress in production (offline, minutes)
@@ -587,7 +530,7 @@ Use the **same `--encoder`** as training. Production never searches; it loads
 `models/<encoder>/target_<T>/`:
 
 ```bash
-vidopt compress input.mp4 -o output.mp4 --target 89 --encoder libsvtav1 --verify
+vidopt compress input.mp4 -o output.mp4 --encoder libsvtav1 --level 2 --verify --resume
 ```
 
 See [§3.6](#36-deploying-trained-models-offline-production) for copying models to another
@@ -621,28 +564,28 @@ model). Fix and re-run with `--resume`.
 **For production, skip the matrix.** Train once with default `aq_then_crf`:
 
 ```bash
-vidopt dev video/corpus --config cpu --encoder libsvtav1 \
-  --set search.targets='[89]' --set paths.work_dir=runs/production --resume
+vidopt train video/corpus --config cpu --encoder libsvtav1 --level 2 \
+  --set paths.work_dir=runs/production --resume
 ```
 
 Log index: `runs/matrix/logs/INDEX.txt`.
 
 ---
 
-# 3. Production mode
+# 3. Compress mode
 
 Fast: no search, no VMAF measurement. Handles **any resolution and any duration**.
 
 ## 3.1 Basic usage
 
 ```bash
-vidopt compress input.mp4 -o output.mp4 --target 89
+vidopt compress input.mp4 -o output.mp4 --level 2
 ```
 
 With verification (re-measures the result — costs an extra VMAF pass):
 
 ```bash
-vidopt compress input.mp4 -o output.mp4 --target 89 --verify
+vidopt compress input.mp4 -o output.mp4 --level 2 --verify
 ```
 
 ```
@@ -658,7 +601,8 @@ elapsed    151.4s
 
 | Option | Effect |
 |---|---|
-| `--target T` | VMAF target. A model must exist for it (`vidopt inspect`) |
+| `--level N` | Quality level: `1=85`, `2=89`, `3=93` |
+| `--target T` | Explicit VMAF target (optional; `--level` is preferred) |
 | `--verify` | Measure the final VMAF and report the score |
 | `--keep-work` | Keep intermediate segments for inspection |
 | `--json` | Also print machine-readable output |
@@ -698,7 +642,7 @@ leaf with no sign that the question was unanswerable. vidopt detects this and sa
 WARNING this input is outside the model's training domain: fps (trained 30..30),
         height (trained 720..720), width (trained 1280..1280). Predictions are
         extrapolations and may miss the VMAF target — verify with --verify, and
-        re-run `vidopt dev` on a corpus that includes content like this.
+        re-run `vidopt train` on a corpus that includes content like this.
 ```
 
 It still produces valid output — but treat the result as unverified. **The fix is to
@@ -715,7 +659,7 @@ For very long files, tune the segment bounds:
 
 ```bash
 # Feature-length input: longer segments = fewer of them = less per-segment overhead
-vidopt compress movie.mkv -o out.mkv --target 89 \
+vidopt compress movie.mkv -o out.mkv --level 2 \
   --set segment.max_segment_seconds=30
 ```
 
@@ -723,23 +667,13 @@ Very short inputs (below `min_segment_seconds`) become a single segment automati
 
 ## 3.5 Batch processing
 
-There is no built-in batch command; a shell loop is clearer and gives you control over
-failure handling:
+There is no built-in batch command; a PowerShell loop is clearer:
 
 ```powershell
-# Windows — PowerShell
 Get-ChildItem C:\data\in\*.mp4 | ForEach-Object {
-    vidopt compress $_.FullName -o "C:\data\out\$($_.Name)" --target 89
+    vidopt compress $_.FullName -o "C:\data\out\$($_.Name)" --level 2
     if ($LASTEXITCODE -ne 0) { Add-Content C:\data\failures.txt $_.FullName }
 }
-```
-
-```bash
-# Linux / macOS
-for f in /data/in/*.mp4; do
-  vidopt compress "$f" -o "/data/out/$(basename "$f")" --target 89 \
-    || echo "FAILED: $f" >> /data/failures.txt
-done
 ```
 
 Each invocation already uses every worker, so run them sequentially rather than in
@@ -763,29 +697,9 @@ models/libsvtav1/target_89/
 `vidopt compress` discovers bundles under `models/<encoder>/target_<T>/` by default
 (`paths.models_dir` in config). Override with `--models-dir` if needed.
 
-### Linux compress package (this machine)
-
-After training, build one archive with runtime + models (no corpus):
-
-```bash
-./scripts/pack_compress.sh
-# -> dist/vidopt-compress-linux-x64.tar.gz
-```
-
-On the production machine:
-
-```bash
-tar xzf vidopt-compress-linux-x64.tar.gz
-cd vidopt-compress-linux-x64
-./vidopt.sh doctor --config cpu
-./vidopt.sh compress in.mp4 -o out/out.mp4 --target 89 --encoder libsvtav1 --verify
-```
-
-See [COMPRESS_GUIDE.md](COMPRESS_GUIDE.md).
-
 ### Windows compress package
 
-On a Windows build machine (after `install.bat` and training):
+After `install.bat` and training:
 
 ```bat
 scripts\pack_compress.bat
@@ -807,7 +721,7 @@ Matrix-trained models live under `models/matrix/<strategy>/<encoder>/target_89/`
 compress at them explicitly:
 
 ```bash
-vidopt compress in.mp4 -o out.mp4 --target 89 --encoder libsvtav1 \
+vidopt compress in.mp4 -o out.mp4 --encoder libsvtav1 --level 2 \
   --models-dir models/matrix/aq_then_crf
 ```
 
@@ -841,7 +755,7 @@ targets by ~2 VMAF; `0.15` gave +1.03 CRF and met two of three.
 
 ```bash
 # Re-tune without re-searching
-vidopt train runs/current/dataset.csv --set model.crf_quantile=0.10
+vidopt train video/corpus --level 2 --set model.crf_quantile=0.10 --resume
 ```
 
 ## 4.2 Search cost vs. model quality
@@ -860,14 +774,13 @@ vidopt train runs/current/dataset.csv --set model.crf_quantile=0.10
 | `vmaf.n_subsample_search` | 2 | 2 halves measurement cost for <0.5 VMAF of noise |
 | `encoder.preset` | medium | `veryfast` for exploration, `slow` for final quality |
 
-Changing `search.strategy` / `sampler` / `crf_solver` needs a new `vidopt dev`
-(or `--resume` on an unfinished run).
-`vidopt train` only re-fits the model on existing labels; `vidopt compress` never searches.
+Changing `search.strategy` / `sampler` / `crf_solver` needs a new `vidopt train`
+run (or `--resume` on an unfinished run). `vidopt compress` never searches.
 
 ## 4.3 Choosing an encoder
 
 Models are **encoder-specific** — a CRF value means something different to each — so
-changing the encoder requires re-running dev mode.
+changing the encoder requires re-running train mode.
 
 | Encoder | Kind | Notes |
 |---|---|---|
@@ -878,7 +791,7 @@ changing the encoder requires re-running dev mode.
 | `av1_nvenc` | GPU | Needs Ada-generation or newer |
 
 ```bash
-vidopt dev path/to/corpus --set encoder.name=libsvtav1
+vidopt train path/to/corpus --set encoder.name=libsvtav1 --level 2 --resume
 ```
 
 ## 4.4 Parallelism
@@ -917,7 +830,7 @@ errors, not silent no-ops.
 
 | Stage | Peak |
 |---|---|
-| Dev mode | corpus + segments + one trial encode per worker |
+| Train mode | corpus + segments + one trial encode per worker |
 | Production | ~1× input (segments are deleted as they are encoded) + output |
 
 `runs/cache/trials.sqlite` grows with the number of trials but stores only numbers — a
@@ -943,7 +856,7 @@ exists. Models are per encoder *and* per target.
 
 **`--verify` says MISSED** — in order: (1) check for the out-of-domain warning, which
 means the corpus does not cover this input; (2) lower `model.crf_quantile`; (3) add
-sources to the corpus and re-run dev mode.
+sources to the corpus and re-run train mode.
 
 **`frame-count mismatch measuring ...`** — a guard, not a bug: the output produced
 *extra* frames (timestamp padding), so the score would compare the wrong pictures.
@@ -960,15 +873,14 @@ point at a resource limit (GPU sessions, disk, memory).
 | Command | Purpose |
 |---|---|
 | `vidopt doctor` | Check the toolchain and configuration |
-| `vidopt dev CORPUS...` | Phase 1: segment, search, train |
-| `vidopt train DATASET` | Re-train from an existing dataset |
-| `vidopt compress IN -o OUT` | Phase 2: compress with predicted parameters |
+| `vidopt train CORPUS...` | Phase 1: segment, search, train (`--resume` continues) |
+| `vidopt compress IN -o OUT` | Phase 2: compress (`--resume` continues) |
 | `vidopt inspect` | List trained models and their metrics |
 | `vidopt score --vmaf V --ratio R` | Evaluate the objective function directly |
 | `vidopt config` | Print the effective configuration |
 | `vidopt config --list-overlays` | List shipped config overlays |
 
-Common to all: `--config`, `--set KEY=VALUE` (e.g. `search.strategy=bayes`), `--log-level`.
+Common to all: `--config`, `--set KEY=VALUE` (e.g. `search.strategy=bayes`), `--level`, `--log-level`.
 
 Setup script:
 
@@ -980,41 +892,26 @@ Setup script:
 | `python scripts/setup.py --skip-ffmpeg` | Only install the Python package |
 | `python scripts/setup.py --force` | Re-download ffmpeg |
 
-## A complete first session
-
-Linux (CPU-only):
-
-```bash
-./install.sh
-# copy training videos into video/corpus/
-./vidopt.sh doctor --config cpu
-python scripts/setup.py --verify
-
-./vidopt.sh dev video/corpus --config cpu --encoder libx265 --cpu-workers 0
-./vidopt.sh inspect
-./vidopt.sh compress in.mp4 -o out/out.mp4 --target 89 --encoder libx265 --verify
-```
-
-Windows PowerShell:
+## A complete first session (Windows)
 
 ```powershell
-# Install (Windows PowerShell; Linux/macOS differs only in the activate line)
+# Development install
 git clone <repo-url> vidopt
 cd vidopt
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python scripts/setup.py
 
-# Check
 vidopt doctor
 python scripts/setup.py --verify
 
-# Learn (hours)
-vidopt dev C:/data/corpus --config cpu
+# Copy videos into video\corpus\ first, then learn (hours)
+vidopt train video\corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 --resume
 
-# Inspect what was learned
 vidopt inspect
 
-# Compress
-vidopt compress C:/data/input.mp4 -o C:/data/output.mp4 --target 89 --verify
+vidopt compress C:\data\input.mp4 -o C:\data\output.mp4 --encoder libsvtav1 --level 2 --verify --resume
 ```
+
+Production zip users: skip venv setup; use `vidopt.bat` instead of `vidopt`. See
+[START_HERE.txt](START_HERE.txt).

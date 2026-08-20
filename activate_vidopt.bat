@@ -7,7 +7,7 @@ set "VIDOPT_FFMPEG_DIR=%ROOT%\vendor\ffmpeg\bin"
 set "PATH=%VIDOPT_FFMPEG_DIR%;%ROOT%\vendor\python;%ROOT%\vendor\python\Scripts;%PATH%"
 echo vidopt ready (bundled Python + ffmpeg). Examples:
 echo   vidopt.bat doctor
-echo   vidopt.bat dev video\corpus --config cpu --set jobs.cpu_workers=3
-echo   vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --verify
+echo   vidopt.bat train video\corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 --resume
+echo   vidopt.bat compress in.mp4 -o out\out.mp4 --encoder libsvtav1 --level 2 --verify
 echo.
 cmd /k

@@ -1,31 +1,37 @@
 #!/usr/bin/env python3
 """Build a single offline **compress-only** archive (runtime + trained models).
 
-Excludes training corpus, dev runs, and training-only scripts. Produces one file:
+Excludes training corpus, dev runs, and training-only scripts. Produces:
 
-  dist/vidopt-compress-linux-x64.tar.gz   (Linux)
-  dist/vidopt-compress-windows-x64.zip    (Windows)
+  dist\\vidopt-compress-windows-x64.zip
 
 Usage:
 
-    python scripts/pack_compress.py                  # auto-detect platform
-    python scripts/pack_compress.py --platform linux
-    python scripts/pack_compress.py --platform windows
+    python scripts\\pack_compress.py
+    scripts\\pack_compress.bat
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import platform
 import shutil
 import sys
-import tarfile
 import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parent
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from pack_archive import (
+    VENDOR_ARCHIVE_NAME,
+    ZIP_COMPRESSLEVEL,
+    compress_vendor,
+    require_vendor,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
@@ -57,24 +63,16 @@ DOC_FILES = (
 )
 
 START_HERE_COMPRESS = """\
-vidopt — compress-only package (offline production)
-===================================================
+vidopt — compress-only package (offline production, Windows)
+============================================================
 
-No training corpus included. Pre-trained models are in models/.
+No training corpus included. Pre-trained models are in models\\.
 
-Linux
------
-  tar xzf vidopt-compress-linux-x64.tar.gz && cd vidopt-compress-linux-x64
-  ./vidopt.sh doctor --config cpu
-  ./vidopt.sh inspect
-  ./vidopt.sh compress input.mp4 -o out/output.mp4 --target 89 --encoder ENCODER --verify
-
-Windows
--------
   Extract vidopt-compress-windows-x64.zip
+  install.bat
   vidopt.bat doctor
   vidopt.bat inspect
-  vidopt.bat compress in.mp4 -o out\\output.mp4 --target 89 --encoder ENCODER --verify
+  vidopt.bat compress in.mp4 -o out\\output.mp4 --encoder ENCODER --level 2 --verify
 
 Replace ENCODER with a name from `vidopt inspect` (must match training).
 See PACKAGE.json for bundled models. Full guide: COMPRESS_GUIDE.md
@@ -165,45 +163,6 @@ def _write_manifest(staging: Path, bundles: list[dict], plat: str) -> None:
     )
 
 
-def _stage_linux(staging: Path, models_dir: Path) -> None:
-    required = [
-        ROOT / ".venv",
-        ROOT / "vendor" / "ffmpeg",
-        ROOT / "src",
-        ROOT / "vidopt.sh",
-        ROOT / "activate_vidopt.sh",
-        ROOT / "install.sh",
-        ROOT / "pyproject.toml",
-        ROOT / "scripts" / "setup.py",
-    ]
-    for path in required:
-        if not path.exists():
-            raise SystemExit(f"missing required path for Linux pack: {path}")
-
-    _copy_tree(ROOT / "src", staging / "src")
-    _copy_tree(ROOT / ".venv", staging / ".venv")
-    _copy_tree(ROOT / "vendor" / "ffmpeg", staging / "vendor" / "ffmpeg")
-    wh = ROOT / "vendor" / "wheelhouse"
-    if wh.is_dir():
-        _copy_tree(wh, staging / "vendor" / "wheelhouse")
-
-    for name in (
-        "vidopt.sh", "activate_vidopt.sh", "install.sh", "pyproject.toml",
-    ):
-        shutil.copy2(ROOT / name, staging / name)
-    (staging / "scripts").mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ROOT / "scripts" / "setup.py", staging / "scripts" / "setup.py")
-
-    for doc in DOC_FILES:
-        if (ROOT / doc).is_file():
-            shutil.copy2(ROOT / doc, staging / doc)
-    (staging / "START_HERE.txt").write_text(START_HERE_COMPRESS, encoding="utf-8")
-
-    (staging / "out").mkdir(parents=True, exist_ok=True)
-    (staging / "out" / ".gitkeep").write_text("", encoding="utf-8")
-    _copy_models(models_dir, staging / "models")
-
-
 def _copy_models(src_root: Path, dst_root: Path) -> None:
     """Copy only complete bundles (directories with metadata.json)."""
     found = False
@@ -217,27 +176,12 @@ def _copy_models(src_root: Path, dst_root: Path) -> None:
 
 
 def _stage_windows(staging: Path, models_dir: Path) -> None:
-    required = [
-        ROOT / "vendor" / "python" / "python.exe",
-        ROOT / "vendor" / "ffmpeg" / "bin" / "ffmpeg.exe",
-        ROOT / "src",
-        ROOT / "vidopt.bat",
-        ROOT / "install.bat",
-    ]
-    for path in required:
-        if not path.exists():
-            raise SystemExit(
-                f"missing required path for Windows pack: {path}\n"
-                "Run install.bat on a Windows build machine first."
-            )
+    require_vendor(ROOT)
 
     _copy_tree(ROOT / "src", staging / "src")
-    _copy_tree(ROOT / "vendor" / "python", staging / "vendor" / "python")
-    _copy_tree(ROOT / "vendor" / "ffmpeg", staging / "vendor" / "ffmpeg")
-    for extra in ("wheelhouse", "installers"):
-        src = ROOT / "vendor" / extra
-        if src.is_dir():
-            _copy_tree(src, staging / "vendor" / extra)
+
+    vendor_zip = staging / VENDOR_ARCHIVE_NAME
+    compress_vendor(ROOT, vendor_zip)
 
     for name in ("vidopt.bat", "activate_vidopt.bat", "install.bat", "pyproject.toml"):
         if (ROOT / name).is_file():
@@ -248,28 +192,28 @@ def _stage_windows(staging: Path, models_dir: Path) -> None:
     for doc in DOC_FILES:
         if (ROOT / doc).is_file():
             shutil.copy2(ROOT / doc, staging / doc)
+    (staging / "START_HERE.txt").write_text(START_HERE_COMPRESS, encoding="utf-8")
 
     (staging / "out").mkdir(parents=True, exist_ok=True)
     (staging / "out" / ".gitkeep").write_text("", encoding="utf-8")
     _copy_models(models_dir, staging / "models")
 
 
-def _tar_gz(staging: Path, archive: Path) -> None:
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(archive, "w:gz") as tar:
-        for item in sorted(staging.iterdir()):
-            tar.add(item, arcname=item.name)
-
-
 def _zip_dir(staging: Path, archive: Path) -> None:
     archive.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(
+        archive,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=ZIP_COMPRESSLEVEL,
+    ) as zf:
         for path in sorted(staging.rglob("*")):
             if path.is_file():
                 zf.write(path, path.relative_to(staging.parent).as_posix())
 
 
-def pack(*, plat: str, models_dir: Path, output: Path | None = None) -> Path:
+def pack(*, models_dir: Path, output: Path | None = None) -> Path:
+    plat = "windows"
     if not _has_models(models_dir):
         raise SystemExit(
             f"no trained models under {models_dir} "
@@ -283,18 +227,10 @@ def pack(*, plat: str, models_dir: Path, output: Path | None = None) -> Path:
         staging = Path(tmp) / f"vidopt-compress-{plat}-x64"
         staging.mkdir(parents=True)
 
-        if plat == "linux":
-            _stage_linux(staging, models_dir)
-            archive = output or (DIST / "vidopt-compress-linux-x64.tar.gz")
-            _write_manifest(staging, bundles, plat)
-            _tar_gz(staging, archive)
-        elif plat == "windows":
-            _stage_windows(staging, models_dir)
-            archive = output or (DIST / "vidopt-compress-windows-x64.zip")
-            _write_manifest(staging, bundles, plat)
-            _zip_dir(staging, archive)
-        else:
-            raise SystemExit(f"unknown platform: {plat}")
+        _stage_windows(staging, models_dir)
+        archive = output or (DIST / "vidopt-compress-windows-x64.zip")
+        _write_manifest(staging, bundles, plat)
+        _zip_dir(staging, archive)
 
     size_mb = archive.stat().st_size / (1024 * 1024)
     print(f"created {archive} ({size_mb:.1f} MB)")
@@ -311,12 +247,6 @@ def pack(*, plat: str, models_dir: Path, output: Path | None = None) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--platform",
-        choices=("linux", "windows", "auto"),
-        default="auto",
-        help="target OS (default: auto from sys.platform)",
-    )
-    parser.add_argument(
         "--models-dir",
         type=Path,
         default=ROOT / "models",
@@ -326,16 +256,12 @@ def main() -> int:
         "--output",
         type=Path,
         default=None,
-        help="output archive path (default: dist/vidopt-compress-<platform>-x64.*)",
+        help="output zip path (default: dist/vidopt-compress-windows-x64.zip)",
     )
     args = parser.parse_args()
 
-    plat = args.platform
-    if plat == "auto":
-        plat = "windows" if os.name == "nt" else "linux"
-
     models_dir = args.models_dir.resolve()
-    pack(plat=plat, models_dir=models_dir, output=args.output)
+    pack(models_dir=models_dir, output=args.output)
     return 0
 
 

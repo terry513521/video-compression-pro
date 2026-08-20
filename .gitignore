@@ -1,1 +1,13 @@
 vendor/*
+dist/
+runs/
+out/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Training corpus (copy locally; not versioned)
+video/corpus/_sources/
+video/corpus/*.mp4
+video/corpus/MANIFEST.json
+video/test/

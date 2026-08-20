@@ -16,6 +16,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from ..config import Config
 from ..encoding.encoders import get_encoder
@@ -51,6 +52,11 @@ _MP_CONTEXT = multiprocessing.get_context("spawn")
 
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".y4m", ".avi", ".m4v", ".ts"}
 _RECORDS_NAME = "search_records.jsonl"
+
+
+def _target_key(target: float) -> str:
+    """Stable JSON key for a VMAF target (89 and 89.0 both become ``\"89\"``)."""
+    return f"{float(target):g}"
 
 
 @dataclass
@@ -91,6 +97,7 @@ def _segment_corpus(
     work_dir: Path,
     *,
     resume: bool = False,
+    progress: callable | None = None,
 ) -> list[Segment]:
     """Segment every source. A failure on one source does not abort the corpus."""
     segments_root = work_dir / "segments"
@@ -110,6 +117,8 @@ def _segment_corpus(
             out_dir = segments_root / source.stem
             produced = segment_video(source, out_dir, caps, config, info=info)
             all_segments.extend(produced)
+            if progress:
+                progress("train.segment.source.done", source=str(source), n_segments=len(produced))
         except VidoptError as exc:
             log.error("skipping %s: %s", source.name, exc)
 
@@ -179,7 +188,7 @@ def _load_resumed_records(
     if not path.is_file():
         return {}
 
-    wanted_keys = {str(t) for t in targets}
+    wanted_keys = {_target_key(t) for t in targets}
     found: dict[str, dict] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -198,7 +207,8 @@ def _load_resumed_records(
         if record.get("encoder") != encoder:
             continue
         results = record.get("results") or {}
-        if not wanted_keys.issubset(results):
+        result_keys = {_target_key(float(k)) for k in results}
+        if not wanted_keys.issubset(result_keys):
             continue
         h = record.get("segment_hash")
         if isinstance(h, str) and h:
@@ -261,7 +271,7 @@ def _search_one(payload: dict) -> dict:
         "encoder": encoder.name,
         "features": features.to_dict(),
         "results": {
-            str(target): {
+            _target_key(target): {
                 "feasible": result.feasible,
                 "vmaf": result.best.vmaf if result.best else 0.0,
                 "rate": result.best.rate if result.best else 1.0,
@@ -299,6 +309,7 @@ def run_dev(
     limit: int | None = None,
     skip_training: bool = False,
     resume: bool = False,
+    progress: Callable[..., None] | None = None,
 ) -> DevResult:
     """Execute the whole dev-mode workflow."""
     started = time.monotonic()
@@ -317,10 +328,29 @@ def run_dev(
     if not sources:
         raise SearchError(f"no video files found in: {inputs}")
     log.info("corpus: %d source video(s)", len(sources))
+    if progress:
+        progress(
+            "train.start",
+            encoder=config.encoder.name,
+            targets=list(config.search.targets),
+            n_sources=len(sources),
+            workers=config.resolved_cpu_workers(),
+            strategy=config.search.strategy,
+            resume=resume,
+        )
 
     log.info("stage 1/4: segmenting")
-    segments = _segment_corpus(sources, caps, config, work_dir, resume=resume)
+    segments = _segment_corpus(sources, caps, config, work_dir, resume=resume, progress=progress)
     log.info("stage 1/4: %d segment(s) from %d source(s)", len(segments), len(sources))
+    if progress:
+        progress("train.stage.segment.done", n_segments=len(segments), n_sources=len(sources))
+        progress(
+            "train.corpus.plan",
+            sources=[
+                {"source": str(src), "segments": sum(1 for s in segments if s.source == str(src))}
+                for src in sources
+            ],
+        )
 
     (work_dir / "segments.json").write_text(
         json.dumps([s.to_dict() for s in segments], indent=2), encoding="utf-8"
@@ -350,6 +380,12 @@ def run_dev(
             before - len(payloads),
             len(payloads),
         )
+        if progress:
+            progress(
+                "train.resume",
+                segments_reused=before - len(payloads),
+                segments_remaining=len(payloads),
+            )
 
     workers = config.resolved_cpu_workers()
     if encoder.is_gpu:
@@ -362,8 +398,18 @@ def run_dev(
     )
 
     records: list[dict] = list(done.values())
+    source_totals: dict[str, int] = {}
+    source_done: dict[str, int] = {}
+    for segment in segments:
+        source_totals[segment.source] = source_totals.get(segment.source, 0) + 1
+    for record in records:
+        src = str(record.get("source", ""))
+        if src:
+            source_done[src] = source_done.get(src, 0) + 1
     if not payloads:
         log.info("stage 3/4: nothing left to search")
+        if progress:
+            progress("train.stage.search.done", done=len(records), total=len(segments))
     elif workers <= 1:
         for payload in payloads:
             try:
@@ -376,6 +422,18 @@ def run_dev(
                     len(records), len(segments),
                     _format_search_record(record),
                 )
+                if progress:
+                    src = str(payload["source"])
+                    source_done[src] = source_done.get(src, 0) + 1
+                    progress(
+                        "train.segment.searched",
+                        segment=Path(payload["segment_path"]).name,
+                        source=src,
+                        source_done=source_done[src],
+                        source_total=source_totals.get(src, 0),
+                        done=len(records),
+                        total=len(segments),
+                    )
             except VidoptError as exc:
                 name = Path(payload["segment_path"]).name
                 log.error("search failed for %s: %s", name, exc)
@@ -398,6 +456,18 @@ def run_dev(
                         len(records), len(segments),
                         _format_search_record(record),
                     )
+                    if progress:
+                        src = str(payload["source"])
+                        source_done[src] = source_done.get(src, 0) + 1
+                        progress(
+                            "train.segment.searched",
+                            segment=Path(payload["segment_path"]).name,
+                            source=src,
+                            source_done=source_done[src],
+                            source_total=source_totals.get(src, 0),
+                            done=len(records),
+                            total=len(segments),
+                        )
                 except Exception as exc:  # noqa: BLE001 - worker errors arrive here
                     name = Path(payload["segment_path"]).name
                     log.error("search failed for %s: %s", name, exc)
@@ -466,6 +536,15 @@ def run_dev(
         "stage 3/4 complete: %d row(s), %d infeasible (%.0f%%)",
         len(rows), n_infeasible, 100.0 * n_infeasible / max(1, len(rows)),
     )
+    if progress:
+        progress(
+            "train.stage.search.done",
+            rows=len(rows),
+            infeasible=n_infeasible,
+            done=n_ok,
+            total=len(segments),
+            dataset=str(dataset_path),
+        )
 
     reports: list[TrainReport] = []
     if skip_training:
@@ -475,6 +554,11 @@ def run_dev(
         from ..modeling.dataset import read_dataset
 
         reports = train_all(read_dataset(dataset_path), config, config.paths.models_dir)
+        if progress:
+            progress(
+                "train.stage.fit.done",
+                models=[r.bundle_path for r in reports],
+            )
 
     elapsed = time.monotonic() - started
     result = DevResult(
@@ -513,4 +597,15 @@ def run_dev(
         encoding="utf-8",
     )
     log.info("dev mode finished in %.1fs", elapsed)
+    if progress:
+        progress(
+            "train.done",
+            seconds=round(elapsed, 2),
+            n_sources=result.n_sources,
+            n_segments=result.n_segments,
+            n_rows=result.n_rows,
+            n_infeasible=result.n_infeasible,
+            dataset=result.dataset_path,
+            models=[r.bundle_path for r in result.reports],
+        )
     return result

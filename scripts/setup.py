@@ -167,7 +167,8 @@ def extract(archive: Path, into: Path) -> Path:
 
 
 def install_ffmpeg(force: bool = False) -> None:
-    if ffmpeg_binary().is_file() and not force:
+    vendored = FFMPEG_DIR / "bin" / f"ffmpeg{EXE}"
+    if vendored.is_file() and not force:
         info("ffmpeg already present, skipping download")
         return
 
@@ -504,8 +505,8 @@ def main() -> int:
     print()
     info("done")
     detail("next:  vidopt doctor")
-    detail("       vidopt dev <corpus-dir>")
-    detail("       vidopt compress in.mp4 -o out.mp4 --target 89 --verify")
+    detail("       vidopt train video\\corpus --config cpu --level 2 --resume")
+    detail("       vidopt compress in.mp4 -o out.mp4 --encoder libx265 --level 2 --verify")
     return 0
 
 

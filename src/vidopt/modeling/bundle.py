@@ -1,9 +1,10 @@
 """Model bundles: versioned, self-describing artifacts.
 
-Schema v2 (current): one bundle per encoder at ``models/<encoder>/``. The model takes
-scene features plus ``vmaf_target`` as input.
+Schema v1 (default): ``models/<encoder>/target_<T>/`` with 8 scene features and separate
+``crf.joblib``, ``aq_mode.joblib``, ``aq_strength.joblib`` heads.
 
-Schema v1 (legacy): ``models/<encoder>/target_<T>/`` with 8 scene features only.
+Schema v2 (legacy unified): one bundle per encoder at ``models/<encoder>/`` with
+``estimators.joblib`` and ``vmaf_target`` as a model input — still loadable.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import numpy as np
 from ..encoding.params import EncodeParams
 from ..errors import ModelError
 from ..features.extract import FEATURE_NAMES, MODEL_FEATURE_NAMES, VMAF_TARGET_FEATURE, with_vmaf_target
+from .dataset import LABEL_NAMES
 from ..log import get_logger
 
 log = get_logger(__name__)
@@ -102,7 +104,11 @@ class ModelBundle:
     def save(self, directory: str | Path) -> Path:
         out = Path(directory)
         out.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self.estimators, out / "estimators.joblib", compress=3)
+        if self.metadata.schema_version == LEGACY_SCHEMA_VERSION:
+            for name in LABEL_NAMES:
+                joblib.dump(self.estimators[name], out / f"{name}.joblib", compress=3)
+        else:
+            joblib.dump(self.estimators, out / "estimators.joblib", compress=3)
         meta = self.metadata
         if not meta.created_at:
             meta.created_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -116,11 +122,10 @@ class ModelBundle:
     def load(cls, directory: str | Path) -> ModelBundle:
         path = Path(directory)
         meta_path = path / "metadata.json"
-        est_path = path / "estimators.joblib"
-        if not meta_path.is_file() or not est_path.is_file():
+        if not meta_path.is_file():
             raise ModelError(
-                f"{path} is not a model bundle (expected metadata.json and "
-                "estimators.joblib). Train one with `vidopt dev` or `vidopt train`."
+                f"{path} is not a model bundle (expected metadata.json). "
+                "Train one with `vidopt train`."
             )
 
         try:
@@ -148,7 +153,26 @@ class ModelBundle:
                 f"  current: {expected}"
             )
 
-        estimators = joblib.load(est_path)
+        if metadata.schema_version == LEGACY_SCHEMA_VERSION:
+            head_paths = {name: path / f"{name}.joblib" for name in LABEL_NAMES}
+            if all(p.is_file() for p in head_paths.values()):
+                estimators = {name: joblib.load(p) for name, p in head_paths.items()}
+            elif (path / "estimators.joblib").is_file():
+                estimators = joblib.load(path / "estimators.joblib")
+            else:
+                missing = [name for name, p in head_paths.items() if not p.is_file()]
+                raise ModelError(
+                    f"{path} is missing model head(s): {missing}. "
+                    "Retrain with `vidopt train`."
+                )
+        else:
+            est_path = path / "estimators.joblib"
+            if not est_path.is_file():
+                raise ModelError(
+                    f"{path} is not a model bundle (expected estimators.joblib). "
+                    "Train one with `vidopt train`."
+                )
+            estimators = joblib.load(est_path)
         return cls(estimators=estimators, metadata=metadata)
 
     # ---------------- inference ----------------
@@ -231,20 +255,24 @@ class ModelBundle:
 
 
 def bundle_dir(models_root: str | Path, encoder: str) -> Path:
-    """Canonical v2 location: ``<root>/<encoder>/``."""
+    """Legacy unified v2 location: ``<root>/<encoder>/``."""
     return Path(models_root) / encoder
 
 
 def legacy_bundle_dir(models_root: str | Path, encoder: str, target: float) -> Path:
-    """Legacy v1 location: ``<root>/<encoder>/target_<T>/``."""
+    """Default v1 location: ``<root>/<encoder>/target_<T>/``."""
     return Path(models_root) / encoder / f"target_{target:g}"
 
 
 def find_bundle(
     models_root: str | Path, encoder: str, target: float
 ) -> ModelBundle:
-    """Load model by encoder first, with legacy fallback by target."""
+    """Load model by encoder and VMAF target (v1 first, unified v2 fallback)."""
     root = Path(models_root)
+    legacy = legacy_bundle_dir(root, encoder, target)
+    if (legacy / "metadata.json").is_file():
+        return ModelBundle.load(legacy)
+
     v2 = bundle_dir(root, encoder)
     if (v2 / "metadata.json").is_file():
         bundle = ModelBundle.load(v2)
@@ -258,13 +286,9 @@ def find_bundle(
                 )
         return bundle
 
-    legacy = legacy_bundle_dir(root, encoder, target)
-    if legacy.is_dir():
-        return ModelBundle.load(legacy)
-
     raise ModelError(
-        f"no model for encoder {encoder!r} (looked in {v2} and {legacy}). "
-        "Run `vidopt dev` first."
+        f"no model for encoder {encoder!r} target {target:g} "
+        f"(looked in {legacy} and {v2}). Run `vidopt train` first."
     )
 
 
@@ -274,10 +298,15 @@ def list_bundles(models_root: str | Path) -> list[Path]:
     if not root.is_dir():
         return []
     found: list[Path] = []
-    for meta in root.glob("*/metadata.json"):
-        if (meta.parent / "estimators.joblib").is_file():
-            found.append(meta.parent)
     for meta in root.glob("**/target_*/metadata.json"):
         if meta.parent.is_dir():
             found.append(meta.parent)
+    for meta in root.glob("*/metadata.json"):
+        parent = meta.parent
+        if parent.name.startswith("target_"):
+            continue
+        if (parent / "estimators.joblib").is_file() or all(
+            (parent / f"{name}.joblib").is_file() for name in LABEL_NAMES
+        ):
+            found.append(parent)
     return sorted(dict.fromkeys(found))

@@ -93,6 +93,7 @@ search:
   #   bayes        Gaussian-process BO (P(VMAF≥target) × CRF)
   #   tpe          Tree-structured Parzen Estimator
   #   cmaes        diagonal CMA-style evolution strategy
+  #   boundary     threshold-first AQ neighbour refine after screening
   strategy: aq_then_crf
   sampler: sobol
   # 1-D CRF at fixed AQ: bisect (secant+bisection), brent, or golden

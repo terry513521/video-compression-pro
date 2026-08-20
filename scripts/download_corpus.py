@@ -526,8 +526,47 @@ def ffmpeg_bin() -> str | None:
     return found
 
 
+def _replace_with_retry(src: Path, dest: Path, attempts: int = 10) -> None:
+    """Windows Defender often locks a just-written file; retry the rename."""
+    last: OSError | None = None
+    for i in range(attempts):
+        try:
+            src.replace(dest)
+            return
+        except OSError as exc:
+            last = exc
+            time.sleep(0.2 * (i + 1))
+    assert last is not None
+    raise last
+
+
 def download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    if dest.is_file() and dest.stat().st_size > 50_000:
+        tmp.unlink(missing_ok=True)
+        return
+    if tmp.is_file() and tmp.stat().st_size > 50_000:
+        try:
+            _replace_with_retry(tmp, dest)
+            return
+        except OSError:
+            tmp.unlink(missing_ok=True)
+    tmp.unlink(missing_ok=True)
+    curl = shutil.which("curl")
+    if curl:
+        argv = [
+            curl, "-L", "--fail", "--retry", "2", "--retry-all-errors",
+            "--connect-timeout", "20", "--max-time", "180",
+            "-A", USER_AGENT, "-o", str(tmp), url,
+        ]
+        result = subprocess.run(argv, check=False)
+        if result.returncode != 0 or not tmp.is_file() or tmp.stat().st_size < 10_000:
+            tmp.unlink(missing_ok=True)
+            raise OSError(f"curl download failed (exit {result.returncode})")
+        print(flush=True)
+        _replace_with_retry(tmp, dest)
+        return
     req = urllib.request.Request(
         url,
         headers={
@@ -535,9 +574,8 @@ def download(url: str, dest: Path) -> None:
             "Accept": "*/*",
         },
     )
-    with urllib.request.urlopen(req, timeout=180) as response:
+    with urllib.request.urlopen(req, timeout=30) as response:
         total = int(response.headers.get("Content-Length") or 0)
-        tmp = dest.with_suffix(dest.suffix + ".part")
         done = 0
         t0 = time.time()
         with tmp.open("wb") as out:
@@ -547,13 +585,15 @@ def download(url: str, dest: Path) -> None:
                     break
                 out.write(chunk)
                 done += len(chunk)
+                if time.time() - t0 > 180:
+                    raise TimeoutError("download exceeded 180s")
                 if total > 0:
                     pct = min(100, done * 100 // total)
                     elapsed = max(0.1, time.time() - t0)
                     mb_s = (done / 1e6) / elapsed
                     print(f"\r    {pct:3d}%  {done/1e6:7.1f} MB  {mb_s:4.1f} MB/s", end="", flush=True)
         print(flush=True)
-        tmp.replace(dest)
+        _replace_with_retry(tmp, dest)
 
 
 def source_path(source: Source) -> Path:
@@ -701,6 +741,10 @@ def main() -> int:
         "--skip-synthetic", action="store_true",
         help="Do not generate the screen/graphics clip.",
     )
+    parser.add_argument(
+        "--skip-host", action="append", default=[],
+        help="Skip sources whose URL contains this substring (repeatable).",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -709,7 +753,7 @@ def main() -> int:
     ffmpeg = ffmpeg_bin()
     if not ffmpeg:
         print(
-            "ERROR: ffmpeg not found. Run ./install.sh first so vendor/ffmpeg exists.",
+            "ERROR: ffmpeg not found. Run install.bat or python scripts/setup.py first.",
             file=sys.stderr,
         )
         return 1
@@ -718,6 +762,10 @@ def main() -> int:
     SOURCES_DIR.mkdir(parents=True, exist_ok=True)
 
     sources = list(CATALOG)
+    if args.skip_host:
+        needles = [h.lower() for h in args.skip_host]
+        sources = [s for s in sources if not any(h in s.url.lower() for h in needles)]
+        detail("skip-host: " + ", ".join(args.skip_host))
     if args.limit is not None:
         sources = sources[: args.limit]
 
@@ -880,7 +928,7 @@ def main() -> int:
             print(f"  - {item}")
         return 1 if not rows else 0
     print()
-    detail("next:  ./vidopt.sh dev video/corpus --config cpu --encoder libx265 --cpu-workers 0")
+    detail("next:  vidopt.bat train video\\corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 --resume")
     return 0
 
 

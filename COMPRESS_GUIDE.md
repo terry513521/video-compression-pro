@@ -1,34 +1,37 @@
-vidopt — compress-only package (offline production)
-===================================================
+vidopt — compress-only package (offline production, Windows)
+============================================================
 
 This archive contains everything to **compress videos** with pre-trained models.
-It does **not** include a training corpus or dev-mode search tools.
+It does **not** include a training corpus or search tools.
 
 Unpack, then:
 
-Linux
------
-  tar xzf vidopt-compress-linux-x64.tar.gz
-  cd vidopt-compress-linux-x64
-  ./vidopt.sh doctor --config cpu
-  ./vidopt.sh inspect
-  ./vidopt.sh compress input.mp4 -o out/output.mp4 --target 89 --encoder libsvtav1 --verify
+```bat
+cd vidopt-compress-windows-x64
+install.bat
+vidopt.bat doctor
+vidopt.bat inspect
+vidopt.bat compress in.mp4 -o out\output.mp4 --encoder libsvtav1 --level 2 --verify
+```
 
-Windows
--------
-  Extract vidopt-compress-windows-x64.zip
-  cd vidopt-compress-windows-x64
-  vidopt.bat doctor
-  vidopt.bat inspect
-  vidopt.bat compress in.mp4 -o out\output.mp4 --target 89 --encoder libsvtav1 --verify
+`install.bat` extracts the bundled `vendor-windows-x64.zip` on first run.
 
 Rules
 -----
   --encoder must match the folder under models\ (see vidopt inspect)
-  --target is the desired VMAF floor (model input; must be within training range)
+  --level sets the VMAF floor (1=85, 2=89, 3=93); or use --target explicitly
   Put input videos anywhere; only -o out\ is used by default
+  --resume continues an interrupted compress run
+
+Build this package (on a machine that finished training):
+
+```bat
+scripts\pack_compress.bat
+rem -> dist\vidopt-compress-windows-x64.zip
+```
 
 Models shipped: see PACKAGE.json
 
-Full guide: COMPRESS_GUIDE.md
-Repair:     REPAIR.txt (Linux: ./install.sh  Windows: install.bat)
+Repair: REPAIR.txt (install.bat)
+
+Full guide: USAGE.md section 3.6 · OFFLINE_GUIDE.md section 10.5

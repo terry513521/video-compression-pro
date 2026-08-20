@@ -3,7 +3,8 @@
 from vidopt.config import Config
 from vidopt.encoding.encoders import LibSvtAv1, LibX265
 from vidopt.encoding.params import EncodeParams
-from vidopt.search.optimizer import _crf_guess, _screen_plan
+from vidopt.search.cache import TrialRecord
+from vidopt.search.optimizer import _best_aq_from_trials, _crf_guess, _screen_plan
 from vidopt.search.samplers import SAMPLERS, get_sampler, params_from_unit, params_to_unit
 
 
@@ -94,3 +95,36 @@ def test_adaptive_strategies_spend_the_explore_budget() -> None:
         trials = explore_adaptive(evaluate, LibSvtAv1(), config, strategy, 85.0)
         assert 4 <= len(trials) <= 8, strategy
         assert all(t.vmaf >= 0 for t in trials)
+
+
+def _trial(aq_mode: int, aq_strength: float, crf: float, vmaf: float, out_bytes: int) -> TrialRecord:
+    return TrialRecord(
+        segment_hash="seg",
+        encoder="libsvtav1",
+        params=EncodeParams(crf=crf, aq_mode=aq_mode, aq_strength=aq_strength),
+        vmaf_model="vmaf_v0.6.1neg",
+        n_subsample=2,
+        ref_bytes=1_000_000,
+        out_bytes=out_bytes,
+        vmaf=vmaf,
+    )
+
+
+def test_best_aq_prefers_best_feasible_compression() -> None:
+    target = 85.0
+    trials = [
+        _trial(0, 1.0, 40.0, 86.0, 460_000),
+        _trial(0, 1.0, 42.0, 85.2, 350_000),
+        _trial(1, 3.0, 39.0, 88.0, 600_000),
+        _trial(1, 3.0, 41.0, 84.5, 420_000),  # infeasible for target 85
+    ]
+    assert _best_aq_from_trials(trials, target) == (0, 1.0)
+
+
+def test_best_aq_falls_back_to_closest_when_infeasible() -> None:
+    target = 85.0
+    trials = [
+        _trial(0, 2.0, 45.0, 83.0, 300_000),
+        _trial(1, 2.0, 45.0, 84.2, 330_000),
+    ]
+    assert _best_aq_from_trials(trials, target) == (1, 2.0)

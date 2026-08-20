@@ -1,47 +1,65 @@
-vidopt — ready-to-run package
-=============================
+vidopt — production package (Windows, offline, train + compress)
+===============================================================
 
 OFFLINE WORKFLOW (train once, compress many times)
-------------------------------------------------
-1. Install / extract (no network after setup)
-2. Copy training videos into video/corpus/
-3. Train:  vidopt dev video/corpus --config cpu --encoder ENCODER --resume
-4. Inspect: vidopt inspect
-5. Compress: vidopt compress in.mp4 -o out/out.mp4 --target 89 --encoder ENCODER
+--------------------------------------------------
+1. Extract the production / project zip
+2. Run install.bat  (extracts vendor-windows-x64.zip + installs vidopt)
+3. Copy training videos into video\corpus\  (if not already in the zip)
+4. Train:    vidopt.bat train video\corpus --config cpu --encoder ENCODER --level LEVEL --cpu-workers 0 --resume
+5. Inspect:  vidopt.bat inspect
+6. Compress: vidopt.bat compress in.mp4 -o out\out.mp4 --encoder ENCODER --level LEVEL --verify --resume
 
-Full guide: USAGE.md sections 2.9 (offline train) and 3.6 (production deploy)
-Windows detail: OFFLINE_GUIDE.md
-Linux detail: LINUX.md section 6
+LEVEL mapping:
+  level 1 -> VMAF 85
+  level 2 -> VMAF 89
+  level 3 -> VMAF 93
 
-Linux (CPU-only):
-  ./install.sh
-  copy training videos into video/corpus/
-  ./vidopt.sh doctor --config cpu
-  ./vidopt.sh dev video/corpus --config cpu --encoder libsvtav1 --cpu-workers 0 \
-    --set search.targets='[89]' --set paths.work_dir=runs/production --resume
-  ./vidopt.sh compress in.mp4 -o out/out.mp4 --target 89 --encoder libsvtav1 --verify
+Resume (after Ctrl+C or crash):
+  Re-run the SAME train command with --resume.
+  Skips finished segment searches (search_records.jsonl) and reuses trial cache (trials.sqlite).
 
-Search algorithms (dev mode only — compress uses the trained model):
-  default          search.strategy=aq_then_crf   recommended for production
-  others           coordinate, sample, bayes, tpe, cmaes
-  Full catalog: USAGE.md section 2.4
-  Optional: widen VMAF labels during dev with --set search.targets='[85,89,93]'
-    (research only — days; models under models/matrix/)
-
-Windows offline zip:
+Example (recommended CPU path):
   vidopt.bat doctor
-  vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4 --resume
-  vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libx265 --verify
-  Pack compress-only (models, no corpus):
-    Linux:   ./scripts/pack_compress.sh
-    Windows: scripts\pack_compress.bat
+  vidopt.bat train video\corpus --config cpu --encoder libsvtav1 --level 2 --cpu-workers 0 --resume
+  vidopt.bat inspect
+  vidopt.bat compress in.mp4 -o out\out.mp4 --encoder libsvtav1 --level 2 --verify --resume
+
+Windows offline zip (full train + compress):
+  scripts\prepare_offline_bundle.bat
+  install.bat
+  scripts\pack_production.bat --with-models
+  -> dist\vidopt-offline-windows-x64.zip
+
+Windows offline zip (build on connected PC):
+  scripts\prepare_offline_bundle.bat
+  install.bat
+  scripts\pack_production.bat --with-models
+  -> dist\vidopt-offline-windows-x64.zip  (contains vendor-windows-x64.zip inside)
+
+Offline PC:
+  extract zip -> install.bat -> vidopt.bat doctor -> train / compress
+
+Full project backup (vendor compressed inside project zip):
+  scripts\pack_project.bat --with-models
+  -> dist\vendor-windows-x64.zip
+  -> dist\vidopt-project-windows-x64.zip
+
+Pack compress-only (optional — encode only, no train on that PC):
+  scripts\pack_compress.bat
+  -> dist\vidopt-compress-windows-x64.zip
   Guide: COMPRESS_GUIDE.md
+
+Search algorithms (train only — compress uses the trained model):
+  default (CLI)   search.strategy=boundary
+  others          aq_then_crf, coordinate, sample, bayes, tpe, cmaes
+  Full catalog: USAGE.md section 2.4
 
 Defaults: encoder=libx265, cpu-workers=4, gpu-workers=0
 
-Models after training: models/<encoder>/  (one bundle; pass --target at compress time)
-Training logs: <work_dir>/logs/vidopt.log
-Matrix logs: runs/matrix/logs/  (see INDEX.txt)
+Models after training: models\<encoder>\target_<VMAF>\
+Training logs: <work_dir>\logs\vidopt.log
+Checkpoints:   <work_dir>\search_records.jsonl, runs\cache\trials.sqlite
 
 Bundled repair kit (no network needed):
   vendor\installers\python-3.11.9-embed-amd64.zip
@@ -49,4 +67,4 @@ Bundled repair kit (no network needed):
   vendor\ffmpeg\bin\ffmpeg.exe + ffprobe.exe
 If damaged: install.bat — see REPAIR.txt
 
-Full guide: OFFLINE_GUIDE.md · USAGE.md
+Full guides: SYSTEM_GUIDE.md · OFFLINE_GUIDE.md · USAGE.md · README.md

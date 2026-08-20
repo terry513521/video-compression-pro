@@ -12,6 +12,7 @@ Strategies (``search.strategy``):
 **bayes.** Sobol/LHS init, then Gaussian-process proposals (P(VMAF≥target)×CRF).
 **tpe.** Parzen estimator: sample where good trials were denser than bad ones.
 **cmaes.** Diagonal CMA-style evolution strategy on the unit cube.
+**boundary.** Threshold-first AQ neighborhood refine with CRF solves at each neighbor.
 
 CRF at fixed AQ (``search.crf_solver``): ``bisect`` (secant+bisection), ``brent``
 (inverse-quadratic interpolation), or ``golden`` (golden-section split).
@@ -44,7 +45,15 @@ from .samplers import SAMPLERS, get_sampler
 
 log = get_logger(__name__)
 
-STRATEGIES = ("aq_then_crf", "coordinate", "sample", "bayes", "tpe", "cmaes")
+STRATEGIES = (
+    "aq_then_crf",
+    "coordinate",
+    "sample",
+    "bayes",
+    "tpe",
+    "cmaes",
+    "boundary",
+)
 CRF_SOLVERS = ("bisect", "brent", "golden")
 ADAPTIVE = {"bayes", "tpe", "cmaes"}
 _PHI = (5.0 ** 0.5 - 1.0) / 2.0  # 1/φ ≈ 0.618
@@ -296,6 +305,39 @@ def _rank_aq(trials: list[TrialRecord], target: float) -> list[tuple[int, float]
     return sorted(by_aq, key=lambda k: by_aq[k], reverse=True)
 
 
+def _best_trial_for_aq(
+    trials: list[TrialRecord], aq_mode: int, aq_strength: float, target: float
+) -> TrialRecord | None:
+    """Best trial for one AQ setting, preferring feasible points."""
+    same = [t for t in trials if _aq_key(t.params) == (aq_mode, aq_strength)]
+    if not same:
+        return None
+    feasible = [t for t in same if is_feasible(t.vmaf, t.rate, target)]
+    if feasible:
+        return max(feasible, key=lambda t: compression_score(t.vmaf, t.rate, target).score)
+    return max(same, key=lambda t: _trial_proxy(t, target))
+
+
+def _best_aq_from_trials(
+    trials: list[TrialRecord], target: float
+) -> tuple[int, float] | None:
+    """Pick AQ with the strongest constrained objective evidence."""
+    keys = {_aq_key(t.params) for t in trials}
+    if not keys:
+        return None
+    best_key: tuple[int, float] | None = None
+    best_value = float("-inf")
+    for aq_mode, aq_strength in keys:
+        best_trial = _best_trial_for_aq(trials, aq_mode, aq_strength, target)
+        if best_trial is None:
+            continue
+        value = _trial_proxy(best_trial, target)
+        if value > best_value:
+            best_value = value
+            best_key = (aq_mode, aq_strength)
+    return best_key
+
+
 def _refine_aq(
     evaluator: Evaluator,
     segment_path: Path,
@@ -378,6 +420,63 @@ def _walk_aq(
         if best_nb is None:
             break
         current = best_nb
+
+
+def _boundary_refine(
+    evaluator: Evaluator,
+    segment_path: Path,
+    segment_hash: str,
+    info: MediaInfo,
+    encoder: Encoder,
+    target: float,
+    all_trials: list[TrialRecord],
+    config: Config,
+) -> None:
+    """Threshold-first AQ refinement.
+
+    Unlike coordinate walk (which compares neighbors at a fixed CRF before re-solving),
+    this strategy solves CRF for each promising AQ neighbor, then compares by the actual
+    constrained objective. It is tailored to "max compression with VMAF floor".
+    """
+    space = encoder.space
+    steps = max(1, int(config.search.n_strength_steps))
+    rounds = max(1, int(config.search.max_coordinate_rounds))
+
+    start = _best_aq_from_trials(all_trials, target)
+    if start is None:
+        mid = space.midpoint()
+        current = (mid.aq_mode, mid.aq_strength)
+    else:
+        current = start
+
+    visited: set[tuple[int, float]] = set()
+    for _ in range(rounds):
+        neighborhood = [current] + space.aq_neighbors(current[0], current[1], steps)
+        changed = False
+        for aq_mode, aq_strength in neighborhood:
+            if (aq_mode, aq_strength) in visited:
+                continue
+            _refine_aq(
+                evaluator,
+                segment_path,
+                segment_hash,
+                info,
+                aq_mode,
+                aq_strength,
+                target,
+                all_trials,
+                config,
+            )
+            visited.add((aq_mode, aq_strength))
+
+        best_key = _best_aq_from_trials(all_trials, target)
+        if best_key is None:
+            break
+        if best_key != current:
+            current = best_key
+            changed = True
+        if not changed:
+            break
 
 
 def _iq_interpolate(points: list[tuple[float, float]], target: float) -> float | None:
@@ -593,6 +692,11 @@ def search_segment(
     for target in targets:
         if strategy == "coordinate":
             _walk_aq(
+                evaluator, segment_path, segment_hash, info, encoder,
+                target, all_trials, config,
+            )
+        elif strategy == "boundary":
+            _boundary_refine(
                 evaluator, segment_path, segment_hash, info, encoder,
                 target, all_trials, config,
             )

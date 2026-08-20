@@ -4,9 +4,12 @@ src/vidopt/__init__.py
 src/vidopt/__main__.py
 src/vidopt/cli.py
 src/vidopt/config.py
+src/vidopt/desktop_ui.py
 src/vidopt/errors.py
 src/vidopt/log.py
+src/vidopt/progress.py
 src/vidopt/scoring.py
+src/vidopt/ui_server.py
 src/vidopt.egg-info/PKG-INFO
 src/vidopt.egg-info/SOURCES.txt
 src/vidopt.egg-info/dependency_links.txt
@@ -40,6 +43,11 @@ src/vidopt/pipeline/production.py
 src/vidopt/quality/__init__.py
 src/vidopt/quality/vmaf.py
 src/vidopt/search/__init__.py
+src/vidopt/search/adaptive.py
 src/vidopt/search/cache.py
 src/vidopt/search/optimizer.py
 src/vidopt/search/samplers.py
+src/vidopt/ui/app.css
+src/vidopt/ui/app.js
+src/vidopt/ui/index.html
+tests/test_search_aq.py

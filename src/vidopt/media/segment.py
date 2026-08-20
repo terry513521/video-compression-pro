@@ -18,6 +18,8 @@ Two things the reference did not do:
 from __future__ import annotations
 
 import shutil
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +31,31 @@ from ..ffmpeg.toolchain import Capabilities
 from ..log import get_logger
 
 log = get_logger(__name__)
+_AV_LOG_FATAL = "8"
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", _AV_LOG_FATAL)
+
+
+@contextmanager
+def _suppress_native_stderr():
+    """Mute native decoder stderr (libavcodec chatter via OpenCV/PySceneDetect)."""
+    if os.environ.get("VIDOPT_SHOW_DECODER_LOGS"):
+        yield
+        return
+    try:
+        saved = os.dup(2)
+    except OSError:
+        yield
+        return
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, 2)
+        finally:
+            os.close(devnull)
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
 
 
 @dataclass(frozen=True)
@@ -107,18 +134,19 @@ def detect_cut_times(
 
     video = None
     try:
-        video = open_video(str(target))
-        manager = SceneManager()
-        if config.segment.detector == "adaptive":
-            manager.add_detector(
-                AdaptiveDetector(adaptive_threshold=config.segment.adaptive_threshold)
-            )
-        else:
-            manager.add_detector(
-                ContentDetector(threshold=config.segment.content_threshold)
-            )
-        manager.detect_scenes(video=video, show_progress=False)
-        scenes = manager.get_scene_list()
+        with _suppress_native_stderr():
+            video = open_video(str(target))
+            manager = SceneManager()
+            if config.segment.detector == "adaptive":
+                manager.add_detector(
+                    AdaptiveDetector(adaptive_threshold=config.segment.adaptive_threshold)
+                )
+            else:
+                manager.add_detector(
+                    ContentDetector(threshold=config.segment.content_threshold)
+                )
+            manager.detect_scenes(video=video, show_progress=False)
+            scenes = manager.get_scene_list()
     except Exception as exc:  # noqa: BLE001
         raise SegmentationError(
             f"scene detection failed for {source.name}: {exc}"

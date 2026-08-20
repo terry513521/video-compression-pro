@@ -1,7 +1,7 @@
 """Command-line interface.
 
     vidopt doctor                     check the toolchain and configuration
-    vidopt dev CORPUS...              phase 1: search + train
+    vidopt train CORPUS...            phase 1: search + train
     vidopt compress INPUT -o OUT      phase 2: compress with predicted parameters
     vidopt train DATASET              re-train from an existing dev dataset
     vidopt inspect                    show what models exist and how good they are
@@ -29,6 +29,7 @@ from .config import (
 )
 from .errors import VidoptError
 from .log import get_logger, setup_logging
+from .progress import ProgressEmitter
 
 log = get_logger(__name__)
 
@@ -42,6 +43,7 @@ _ENCODER_CHOICES = (
     "libx265", "libx264", "libsvtav1",
     "hevc_nvenc", "av1_nvenc", "h264_nvenc",
 )
+_LEVEL_TO_VMAF: dict[int, float] = {1: 85.0, 2: 89.0, 3: 93.0}
 
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -66,6 +68,13 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--level", type=int, choices=sorted(_LEVEL_TO_VMAF), default=None, metavar="N",
+        help=(
+            "Quality level shorthand: 1=VMAF 85, 2=VMAF 89, 3=VMAF 93. "
+            "For dev/train/compress workflows."
+        ),
+    )
+    parser.add_argument(
         "--cpu-workers", type=int, default=None, metavar="N",
         help="Concurrent CPU encode jobs (default: 4). 0 = auto from core count.",
     )
@@ -85,6 +94,12 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         "--log-file", default=None, metavar="PATH",
         help="Also write logs to this file (default: <work_dir>/logs/vidopt.log).",
     )
+    parser.add_argument(
+        "--progress-jsonl", default=None, metavar="PATH",
+        help=(
+            "Append real-time progress events as JSON Lines for desktop UI consumption."
+        ),
+    )
 
 
 
@@ -93,11 +108,23 @@ def _cli_overrides(args: argparse.Namespace) -> list[str]:
     overrides = list(args.overrides)
     if getattr(args, "encoder", None):
         overrides.append(f"encoder.name={args.encoder}")
+    if getattr(args, "level", None) is not None:
+        target = _LEVEL_TO_VMAF[int(args.level)]
+        overrides.append(f"search.targets=[{target:g}]")
     if getattr(args, "cpu_workers", None) is not None:
         overrides.append(f"jobs.cpu_workers={args.cpu_workers}")
     if getattr(args, "gpu_workers", None) is not None:
         overrides.append(f"jobs.gpu_workers={args.gpu_workers}")
     return overrides
+
+
+def _has_strategy_override(args: argparse.Namespace) -> bool:
+    """True when the user explicitly set search.strategy via --set."""
+    for item in getattr(args, "overrides", []) or []:
+        key = str(item).split("=", 1)[0].strip()
+        if key == "search.strategy":
+            return True
+    return False
 
 
 def _resolve_config(args: argparse.Namespace) -> tuple[Config, list[str], list[str]]:
@@ -191,23 +218,29 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_dev(args: argparse.Namespace) -> int:
+def cmd_train(args: argparse.Namespace) -> int:
     from .pipeline.dev import run_dev
 
+    # For threshold training, boundary search is a better default objective match:
+    # maximise compression while respecting a VMAF floor.
+    if not _has_strategy_override(args):
+        args.overrides.append("search.strategy=boundary")
     config, paths, overrides = _resolve_config(args)
+    progress = ProgressEmitter(args.progress_jsonl).emit if args.progress_jsonl else None
     result = run_dev(
         args.corpus,
         config,
         paths,
         overrides,
         limit=args.limit,
-        skip_training=args.no_train,
+        skip_training=False,
         resume=args.resume,
+        progress=progress,
     )
 
     print()
     print("=" * 74)
-    print("dev mode complete")
+    print("training complete")
     print("=" * 74)
     print(f"sources    {result.n_sources}")
     print(f"segments   {result.n_segments}")
@@ -223,34 +256,23 @@ def cmd_dev(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_train(args: argparse.Namespace) -> int:
-    from .modeling.dataset import read_dataset
-    from .modeling.train import train_all
-
-    config, _, _ = _resolve_config(args)
-    rows = read_dataset(args.dataset)
-    reports = train_all(rows, config, args.models_dir or config.paths.models_dir)
-
-    print()
-    for report in reports:
-        print(report.summary())
-        print(f"  -> {report.bundle_path}")
-    return 0
-
-
 def cmd_compress(args: argparse.Namespace) -> int:
     from .pipeline.production import compress
 
     config, paths, overrides = _resolve_config(args)
+    target = _LEVEL_TO_VMAF[int(args.level)] if args.level is not None else args.target
+    progress = ProgressEmitter(args.progress_jsonl).emit if args.progress_jsonl else None
     result = compress(
         args.input,
         args.output,
-        args.target,
+        target,
         config,
         paths,
         overrides,
         verify=args.verify,
         keep_work=args.keep_work,
+        resume=args.resume,
+        progress=progress,
     )
 
     print()
@@ -268,12 +290,12 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     config, _, _ = _resolve_config(args)
     root = Path(args.models_dir or config.paths.models_dir)
     if not root.is_dir():
-        print(f"no models directory at {root}. Run `vidopt dev` first.")
+        print(f"no models directory at {root}. Run `vidopt train` first.")
         return 1
 
     found = list_bundles(root)
     if not found:
-        print(f"no model bundles under {root}. Run `vidopt dev` first.")
+        print(f"no model bundles under {root}. Run `vidopt train` first.")
         return 1
 
     for directory in found:
@@ -294,7 +316,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 text = "unknown"
             print(f"  encoder       {meta.encoder}   VMAF range {text}")
         else:
-            print(f"  encoder       {meta.encoder}   target VMAF {meta.target:g} (legacy)")
+            print(f"  encoder       {meta.encoder}   target VMAF {meta.target:g}")
         print(
             f"  trained on    {meta.n_train} row(s) "
             f"from {len(meta.training_sources)} source(s)"
@@ -362,8 +384,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "typical workflow:\n"
             "  vidopt doctor --config cpu\n"
-            "  vidopt dev video/corpus --config cpu --encoder libx265 --cpu-workers 0\n"
-            "  vidopt compress in.mp4 -o out.mp4 --target 89 --encoder libx265 --verify\n"
+            "  vidopt train video/corpus --config cpu --encoder libx265 --level 2 --resume\n"
+            "  vidopt compress in.mp4 -o out.mp4 --encoder libx265 --level 2 --verify\n"
             "\n"
             "scalability:\n"
             "  --cpu-workers N   concurrent CPU jobs (default 4; 0=auto)\n"
@@ -378,28 +400,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p_doctor)
     p_doctor.set_defaults(func=cmd_doctor)
 
-    p_dev = sub.add_parser(
-        "dev", help="phase 1: segment a corpus, search parameters, train models"
+    p_train = sub.add_parser(
+        "train", help="phase 1: segment corpus, search parameters, and train models"
     )
-    p_dev.add_argument("corpus", nargs="+", help="Video files and/or directories.")
-    p_dev.add_argument("--limit", type=int, default=None, help="Use at most N sources.")
-    p_dev.add_argument(
-        "--no-train", action="store_true", help="Build the dataset but skip training."
-    )
-    p_dev.add_argument(
+    p_train.add_argument("corpus", nargs="+", help="Video files and/or directories.")
+    p_train.add_argument("--limit", type=int, default=None, help="Use at most N sources.")
+    p_train.add_argument(
         "--resume",
         action="store_true",
         help=(
-            "Continue an interrupted `vidopt dev` in the same work directory. "
+            "Continue an interrupted `vidopt train` in the same work directory. "
             "Reuses existing scene cuts and skips segments already searched."
         ),
     )
-    _add_common(p_dev)
-    p_dev.set_defaults(func=cmd_dev)
-
-    p_train = sub.add_parser("train", help="train models from an existing dev dataset")
-    p_train.add_argument("dataset", help="Path to dataset.csv from `vidopt dev`.")
-    p_train.add_argument("--models-dir", default=None, help="Where to write bundles.")
     _add_common(p_train)
     p_train.set_defaults(func=cmd_train)
 
@@ -417,6 +430,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_compress.add_argument(
         "--keep-work", action="store_true", help="Keep intermediate segments."
+    )
+    p_compress.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume an interrupted compression from existing intermediate files in the "
+            "work directory."
+        ),
     )
     p_compress.add_argument("--json", action="store_true", help="Also print JSON.")
     _add_common(p_compress)

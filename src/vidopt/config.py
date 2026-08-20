@@ -137,6 +137,7 @@ class SearchConfig:
     'bayes'        GP Bayesian optimisation after an initial design
     'tpe'          Tree-structured Parzen Estimator
     'cmaes'        diagonal CMA-style evolution strategy
+    'boundary'     threshold-first AQ neighbourhood refine with CRF solves
     """
 
     sampler: str = "sobol"

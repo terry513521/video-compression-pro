@@ -1,6 +1,6 @@
 # Fast overlay for smoke tests and CI — deliberately low fidelity.
 #
-#   vidopt dev ../video/4k --config configs/quick.yaml --limit 2
+#   vidopt train ../video/4k --config configs/quick.yaml --limit 2 --level 2
 #
 # Not for producing models you intend to deploy: the search budget is far too small to
 # characterise the AQ space, and the segments are short.

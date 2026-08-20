@@ -75,7 +75,7 @@ def read_dataset(path: str | Path) -> list[dict[str, str]]:
     if missing:
         raise ModelError(
             f"dataset {p} is missing column(s): {sorted(missing)}. "
-            "It was probably written by a different version; re-run `vidopt dev`."
+            "It was probably written by a different version; re-run `vidopt train`."
         )
     return rows
 

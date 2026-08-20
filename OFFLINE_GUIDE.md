@@ -7,7 +7,7 @@ install the environment, copy a video corpus, train models, then compress videos
 **`vidopt.bat`**. The package ships its own Python and ffmpeg; the OS does **not**
 need either installed.
 
-Related docs: [README.md](README.md) · [USAGE.md](USAGE.md) · [HANDOFF.md](HANDOFF.md)
+Related docs: [README.md](README.md) · [USAGE.md](USAGE.md) · [SYSTEM_GUIDE.md](SYSTEM_GUIDE.md) · [START_HERE.txt](START_HERE.txt)
 
 ---
 
@@ -40,7 +40,7 @@ Two phases:
 
 | Phase | Command | Network? | When | Cost |
 |---|---|---|---|---|
-| **Train (dev)** | `vidopt dev <corpus>` | No | Once per corpus/encoder | Hours |
+| **Train** | `vidopt train <corpus> --resume` | No | Once per corpus/encoder | Hours |
 | **Compress (production)** | `vidopt compress IN -o OUT` | No | Every video | Minutes |
 
 Training **measures** VMAF on many encodes, then learns models that map scene features →
@@ -69,7 +69,7 @@ Default VMAF targets: **85, 89, 93**. Default encoder: **libx265** (CPU).
 - Disk: ~2 GB for tools, plus **several x corpus size** for training scratch (`runs\`)
 - Optional: NVIDIA GPU (use `--encoder hevc_nvenc --gpu-workers 1` only if `vidopt.bat doctor` shows NVENC OK)
 
-Not needed: OS Python, Docker, Git, bash, make, internet.
+Not needed: OS Python, Docker, Git, internet.
 
 ---
 
@@ -90,7 +90,7 @@ vidopt-offline-windows-x64\   (or C:\vidopt — shorter paths are safer on Windo
     wheelhouse\               offline pip wheels (repair)
     installers\               Python embed zip / .exe + get-pip.py (repair)
   src\vidopt\                 application source (used by install.bat)
-  models\                     trained model bundles (created by `vidopt.bat dev`)
+  models\                     trained model bundles (created by `vidopt.bat train`)
     libx265\
       target_85\
       target_89\
@@ -136,39 +136,35 @@ After `install.bat` succeeds on the build PC:
 scripts\pack_production.bat
 ```
 
-Creates `dist\vidopt-offline-windows-x64.zip` — a **ready-to-run** copy of the
-installed environment:
+Produces `dist\vidopt-offline-windows-x64.zip` — vendor is compressed first, then embedded
+in the project zip. On the offline PC: **extract → `install.bat` → train/compress**.
 
 | Included | Excluded |
 |---|---|
-| `vendor\python\` with **all libraries already installed** | `.venv\`, `.git\` |
-| `vendor\ffmpeg\bin\` (ffmpeg + ffprobe + libvmaf) | `runs\`, sample `video\` |
-| `vendor\installers\python-3.11.9-amd64.exe` (official installer) | `tests\`, caches |
-| `vendor\wheelhouse\`, `src\`, `vidopt.bat` | |
-| empty `video\corpus\`, `out\`, `models\` | |
-| optional trained `models\` with `--with-models` | |
+| `vendor-windows-x64.zip` (compressed runtime) | raw `vendor/` folder |
+| `src\`, docs, scripts, `vidopt.bat`, `install.bat` | `.venv\`, `.git\` |
+| empty `video\corpus\`, `out\`, `models\` or trained `models\` with `--with-models` | `runs\`, sample videos |
 
-On the download PC: **extract and run** — no `install.bat` required.
+On the offline PC: **extract → `install.bat` → `vidopt.bat doctor`**.  
+`install.bat` extracts `vendor-windows-x64.zip` and installs vidopt into bundled Python.
 
 ---
 
-## 5. On the offline PC — extract and run
+## 5. On the offline PC — extract and install
 
-The production zip already contains the **installed** environment.
-The offline OS needs **no** Python and **no** ffmpeg installed. **Do not run
-`install.bat` unless something is broken.**
+The production zip contains **`vendor-windows-x64.zip`** (compressed runtime), not an
+expanded `vendor\` folder. **Run `install.bat` once** after extract — it unpacks vendor
+and installs vidopt into bundled Python. No network required.
 
 ```bat
-cd path\to\extracted\folder
+cd path\to\extracted\vidopt-offline-windows-x64
+install.bat
 vidopt.bat doctor
-vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4
-vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libx265 --verify
+vidopt.bat train video\corpus --encoder libsvtav1 --level 2 --cpu-workers 0 --resume
+vidopt.bat compress in.mp4 -o out\out.mp4 --encoder libsvtav1 --level 2 --verify
 ```
 
-`install.bat` is a **repair** tool (reinstalls wheels + recopies vidopt). See
-**[REPAIR.txt](REPAIR.txt)** and [§13](#13-repair-damaged-or-missing-files) if files are
-damaged. `vendor\installers\python-3.11.9-amd64.exe` is optional and not required to run
-vidopt.
+Run `install.bat` again only for **repair** if files are damaged. See **REPAIR.txt**.
 
 ---
 
@@ -220,7 +216,7 @@ Copy-Item D:\my_videos\*.mp4 E:\video-compression\video\corpus\ -Force
 robocopy D:\corpus E:\video-compression\video\corpus /E
 ```
 
-Flat folder or nested folders both work — `vidopt dev` recurses directories.
+Flat folder or nested folders both work — `vidopt train` recurses directories.
 
 **Do not** put only tiny smoke clips if you will compress long 4K films. Match production.
 
@@ -241,96 +237,112 @@ ffprobe -v error -select_streams v:0 `
 Not for deployment — only to prove the pipeline works:
 
 ```powershell
-vidopt dev E:\video-compression\video\corpus --limit 2 --config quick
+vidopt train E:\video-compression\video\corpus --limit 2 --config quick --level 2
 ```
 
 ### 8.2 Full training (for real models)
 
-**CPU (default, always works):**
+**CPU (recommended):**
 
 ```powershell
-# Prefer fewer parallel jobs on 4K — avoids Windows out-of-memory crashes
-vidopt dev E:\video-compression\video\corpus --config cpu `
-  --set paths.work_dir=runs/production `
-  --set jobs.cpu_workers=4
+vidopt train E:\video-compression\video\corpus --config cpu `
+  --encoder libsvtav1 --level 2 --cpu-workers 0 `
+  --set paths.work_dir=runs/production --resume
 ```
 
 **GPU (only if doctor shows NVENC OK):**
 
 ```powershell
-vidopt dev E:\video-compression\video\corpus --config gpu `
-  --set paths.work_dir=runs/production `
-  --set jobs.gpu_workers=2
+vidopt train E:\video-compression\video\corpus --config gpu `
+  --encoder hevc_nvenc --level 2 --gpu-workers 1 --cpu-workers 4 `
+  --set paths.work_dir=runs/production --resume
 ```
 
-**Single VMAF target** (faster; train others later from the same dataset if needed):
+**Single VMAF target via `--level`** (level 2 = VMAF 89):
 
 ```powershell
-vidopt dev E:\video-compression\video\corpus --config cpu `
-  --set paths.work_dir=runs/production `
-  --set "search.targets=[89.0]" `
-  --set jobs.cpu_workers=4
+vidopt train E:\video-compression\video\corpus --config cpu `
+  --encoder libsvtav1 --level 2 --cpu-workers 0 `
+  --set paths.work_dir=runs/production --resume
 ```
 
-> PowerShell tip: quote list overrides — `"search.targets=[89.0]"` — so `[ ]` is not
-> treated as a wildcard.
+Or override targets explicitly:
+
+```powershell
+vidopt train E:\video-compression\video\corpus --config cpu `
+  --encoder libsvtav1 --set "search.targets=[89]" `
+  --set paths.work_dir=runs/production --cpu-workers 0 --resume
+```
 
 ### 8.3 What happens (4 stages)
 
 ```
 stage 1/4  segment by scene cuts
 stage 2/4  hash segments (trial cache keys)
-stage 3/4  search: encode + VMAF (default: enumerate AQ, then bisect CRF)   ← slow
+stage 3/4  search: encode + VMAF per segment (CLI default: boundary)   ← slow
 stage 4/4  train models → models\<encoder>\target_<T>\
 ```
 
 Expect **hours** on 4K. That is normal.
 
-Search strategy is `search.strategy` (default `aq_then_crf`). Algorithms, samplers, and
+Search strategy is `search.strategy` (CLI default **`boundary`**). Algorithms, samplers, and
 CRF solvers: [USAGE.md §2.4](USAGE.md#24-search-algorithms).
 
 ```powershell
 # AQ neighbour walk
-vidopt dev E:\video-compression\video\corpus --config cpu `
+vidopt train E:\video-compression\video\corpus --config cpu `
   --set search.strategy=coordinate
 
 # 3-D Sobol design
-vidopt dev E:\video-compression\video\corpus --config cpu `
+vidopt train E:\video-compression\video\corpus --config cpu `
   --set search.strategy=sample --set search.sampler=sobol
 
 # Bayesian optimisation
-vidopt dev E:\video-compression\video\corpus --config cpu `
+vidopt train E:\video-compression\video\corpus --config cpu `
   --set search.strategy=bayes --set search.sampler=lhs
 ```
 
 ### 8.4 Interrupt and resume
 
-Safe to stop with `Ctrl+C`. Trials are cached in SQLite. Re-run the **same** command:
+Safe to stop with `Ctrl+C`. Progress is checkpointed locally:
+
+| Artifact | Purpose |
+|---|---|
+| `<work_dir>\search_records.jsonl` | One line per finished segment search |
+| `runs\cache\trials.sqlite` | Individual encode + VMAF trials |
+
+Re-run the **same command with `--resume`**:
 
 ```powershell
-vidopt dev E:\video-compression\video\corpus --config cpu `
+vidopt train E:\video-compression\video\corpus --config cpu `
+  --encoder libsvtav1 --level 2 --cpu-workers 0 `
   --set paths.work_dir=runs/production `
-  --set jobs.cpu_workers=4
+  --resume
 ```
 
-Already-finished trials are skipped.
+With `--resume`, existing scene cuts are reused and segments already in
+`search_records.jsonl` for the same encoder + VMAF target are skipped. Without
+`--resume`, search runs again for every segment (cached trials still avoid
+re-encoding).
 
 ### 8.5 Train overnight in the background (PowerShell)
 
 ```powershell
-Start-Process -FilePath "E:\video-compression\.venv\Scripts\vidopt.exe" `
+Start-Process -FilePath "E:\video-compression\vendor\python\python.exe" `
   -ArgumentList @(
-    "dev", "E:\video-compression\video\corpus",
+    "-m", "vidopt", "train", "E:\video-compression\video\corpus",
     "--config", "cpu",
+    "--encoder", "libsvtav1",
+    "--level", "2",
+    "--cpu-workers", "0",
     "--set", "paths.work_dir=runs/production",
-    "--set", "jobs.cpu_workers=4"
+    "--resume"
   ) `
-  -RedirectStandardOutput "E:\video-compression\runs\logs\dev.out.log" `
-  -RedirectStandardError  "E:\video-compression\runs\logs\dev.err.log" `
+  -RedirectStandardOutput "E:\video-compression\runs\logs\train.out.log" `
+  -RedirectStandardError  "E:\video-compression\runs\logs\train.err.log" `
   -WindowStyle Hidden
 
-# Watch progress
-Get-Content E:\video-compression\runs\logs\dev.err.log -Wait -Tail 30
+Get-Content E:\video-compression\runs\logs\train.err.log -Wait -Tail 30
 ```
 
 ### 8.6 Artifacts after training
@@ -339,26 +351,28 @@ Get-Content E:\video-compression\runs\logs\dev.err.log -Wait -Tail 30
 |---|---|
 | `runs\production\dataset.csv` | labelled rows (segment Ã— target) |
 | `runs\production\dev_summary.json` | run summary + metrics |
+| `runs\production\search_records.jsonl` | segment search checkpoints (resume) |
 | `runs\cache\trials.sqlite` | all encode/VMAF trials (resume cache) |
 | `models\libx265\target_85\` … | deployable model bundles |
 
 ### 8.7 Search algorithms (when to change)
 
-Dev mode **searches** encoder parameters; production **predicts** from the trained model.
+Train mode **searches** encoder parameters; compress **predicts** from the trained model.
 The search algorithm only affects **training quality and time**, not how compress runs.
 
-Default (recommended for production): `search.strategy=aq_then_crf`. Full catalog:
+CLI `vidopt train` defaults to `search.strategy=boundary`. Full catalog:
 [USAGE.md §2.4](USAGE.md#24-search-algorithms).
 
 | Strategy | Use when |
 |---|---|
-| `aq_then_crf` | Normal training (default) |
+| `boundary` | CLI default — threshold-first AQ refinement |
+| `aq_then_crf` | Enumerate AQ, then CRF-solve |
 | `coordinate` | x265 float AQ-strength interacts with neighbours |
 | `sample` | Baseline 3-D design (Sobol/LHS/Halton) |
 | `bayes` / `tpe` / `cmaes` | Research; slower, no guarantee vs default |
 
 ```powershell
-vidopt dev E:\video-compression\video\corpus --config cpu `
+vidopt train E:\video-compression\video\corpus --config cpu `
   --encoder libsvtav1 --cpu-workers 4 `
   --set search.targets=[89] `
   --set paths.work_dir=runs/production `
@@ -380,7 +394,7 @@ See [USAGE.md §2.10](USAGE.md#210-optional-algorithm-matrix).
 
 | Log | Path |
 |---|---|
-| Main dev log | `<work_dir>\logs\vidopt.log` |
+| Main train log | `<work_dir>\logs\vidopt.log` |
 | Worker logs | `<work_dir>\logs\worker-<pid>.log` |
 | Segment checkpoint | `<work_dir>\search_records.jsonl` |
 | Trial cache | `runs\cache\trials.sqlite` |
@@ -471,34 +485,26 @@ Production does **not** need the internet and does **not** need VMAF unless `--v
 
 ### 10.5 Offline production deploy (compress-only archive)
 
-**Recommended:** one zip/tar with runtime + models, **no corpus**.
+**Recommended:** one zip with runtime + models, **no corpus**.
 
-| Platform | Build (after training) | Output |
-|---|---|---|
-| Linux | `./scripts/pack_compress.sh` | `dist/vidopt-compress-linux-x64.tar.gz` |
-| Windows | `scripts\pack_compress.bat` | `dist\vidopt-compress-windows-x64.zip` |
-
-**Excluded from the archive:** `video/corpus`, `video/test`, `runs/`, training scripts
-(`download_corpus.py`, `train_matrix.py`), dev search cache.
-
-**Included:** `.venv` (Linux) or `vendor\python` (Windows), `vendor\ffmpeg`, `src\`,
-trained `models/<encoder>/target_<T>/`, `out\` (empty), `COMPRESS_GUIDE.md`,
-`PACKAGE.json` (model manifest).
-
-```bash
-# Linux production machine
-tar xzf vidopt-compress-linux-x64.tar.gz
-cd vidopt-compress-linux-x64
-./vidopt.sh doctor --config cpu
-./vidopt.sh inspect
-./vidopt.sh compress in.mp4 -o out\out.mp4 --target 89 --encoder libsvtav1 --verify
-```
+Build on the training machine (after `vidopt train` finishes):
 
 ```bat
-REM Windows production machine
+scripts\pack_compress.bat
+rem -> dist\vidopt-compress-windows-x64.zip
+```
+
+**Excluded:** `video\corpus`, `runs\`, training scripts, trial cache.
+
+**Included:** `vendor\python\`, `vendor\ffmpeg\`, trained `models\<encoder>\target_<T>\`,
+`out\` (empty), `COMPRESS_GUIDE.md`, `PACKAGE.json`.
+
+On the production machine:
+
+```bat
 vidopt.bat doctor
 vidopt.bat inspect
-vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libsvtav1 --verify
+vidopt.bat compress in.mp4 -o out\out.mp4 --encoder libsvtav1 --level 2 --verify
 ```
 
 Full guide: [COMPRESS_GUIDE.md](COMPRESS_GUIDE.md).
@@ -507,7 +513,7 @@ Full guide: [COMPRESS_GUIDE.md](COMPRESS_GUIDE.md).
 
 On a machine that only compresses (models already trained), copy:
 
-1. Project + `vendor\` + `.venv` setup (§5), **or** the production zip with `--with-models`
+1. Production zip with `--with-models`, **or** `vendor\` + `vidopt.bat` + `models\`
 2. The `models\` directory tree for your encoder/target(s)
 
 Then only run `vidopt compress ...`.
@@ -520,16 +526,15 @@ Then only run `vidopt compress ...`.
 vidopt.bat doctor
 
 rem Train (defaults: encoder=libx265, cpu-workers=4, gpu-workers=0)
-vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4
-vidopt.bat dev video\corpus --encoder hevc_nvenc --gpu-workers 1 --cpu-workers 4
-vidopt.bat train runs\production\dataset.csv --encoder libx265
+vidopt.bat train video\corpus --encoder libx265 --level 2 --cpu-workers 4 --resume
+vidopt.bat train video\corpus --encoder hevc_nvenc --level 2 --gpu-workers 1 --cpu-workers 4 --resume
 
 rem Compress (must match the encoder used for training)
-vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder libx265 --verify
+vidopt.bat compress in.mp4 -o out\out.mp4 --encoder libx265 --level 2 --verify --resume
 
 rem Scale out
-vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --cpu-workers 8
-vidopt.bat compress in.mp4 -o out\out.mp4 --target 89 --encoder hevc_nvenc --gpu-workers 2
+vidopt.bat compress in.mp4 -o out\out.mp4 --level 2 --cpu-workers 8
+vidopt.bat compress in.mp4 -o out\out.mp4 --encoder hevc_nvenc --level 2 --gpu-workers 2
 
 vidopt.bat inspect
 vidopt.bat config
@@ -549,7 +554,7 @@ Common flags on most commands:
 |---|---|
 | `--config cpu\|gpu\|quick\|PATH` | overlay YAML |
 | `--set section.key=value` | one-off override |
-| `--log-level DEBUG` | more logging |
+| `--resume` | Continue interrupted train or compress |
 
 Config layering: **defaults → `--config` overlay(s) → `--encoder` / `--cpu-workers` / `--gpu-workers` / `--set`**.
 
@@ -557,28 +562,33 @@ Config layering: **defaults → `--config` overlay(s) → `--encoder` / `--cpu-w
 
 ## 12. Tuning and re-training
 
-Search is expensive; training from `dataset.csv` is cheap.
+If search is already complete, re-run train with `--resume` and a new `model.crf_quantile`
+— search is skipped, only model fitting runs again:
 
 ```powershell
 # More conservative CRF (higher chance of hitting VMAF; larger files)
-vidopt train runs\production\dataset.csv --set model.crf_quantile=0.10
+vidopt train E:\video-compression\video\corpus --encoder libx265 --level 2 `
+  --set paths.work_dir=runs/production `
+  --set model.crf_quantile=0.10 --resume
 
 # More aggressive compression (more risk of MISSED)
-vidopt train runs\production\dataset.csv --set model.crf_quantile=0.25
+vidopt train E:\video-compression\video\corpus --encoder libx265 --level 2 `
+  --set paths.work_dir=runs/production `
+  --set model.crf_quantile=0.25 --resume
 ```
 
 Default `crf_quantile` is `0.15`. If `--verify` often reports **MISSED**, lower it
-(e.g. `0.10`) and re-train — no need to re-run `vidopt dev`.
+(e.g. `0.10`) and re-run with `--resume`.
 
 If many rows are **infeasible** during search, the target may be too high for that
 encoder/preset, or the content is extreme — add more similar corpus clips or lower the
 target.
 
-To change **how** parameters are searched (requires a new `vidopt dev`, not just
-`vidopt train`):
+To change **how** parameters are searched (requires a new search pass with `--resume` or
+a fresh train without `--resume`):
 
 ```powershell
-vidopt dev E:\video-compression\video\corpus --config cpu `
+vidopt train E:\video-compression\video\corpus --config cpu `
   --set search.strategy=coordinate
 ```
 
@@ -705,18 +715,18 @@ Close players / kill leftover `ffmpeg.exe` processes and retry.
 ### Out of memory during 4K training
 
 ```bat
-vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 2
+vidopt.bat train video\corpus --encoder libx265 --cpu-workers 2 --resume
 ```
 
 ### Hit rate low / verify MISSED
 
 1. Train on content like production (same resolution).
-2. `vidopt.bat train runs\production\dataset.csv --encoder libx265 --set model.crf_quantile=0.10`
-3. Add more corpus clips and re-run `vidopt.bat dev`.
+2. `vidopt.bat train video\corpus --encoder libx265 --level 2 --set model.crf_quantile=0.10 --resume`
+3. Add more corpus clips and re-run `vidopt.bat train ... --resume`.
 
 ### Outside training domain warning on compress
 
-Re-run `vidopt.bat dev` on a corpus that includes that resolution / content type.
+Re-run `vidopt.bat train ... --resume` on a corpus that includes that resolution / content type.
 
 ### Offline install tries the network
 
@@ -732,9 +742,9 @@ Keep the project near the drive root (`C:\vidopt`) or enable Windows long paths 
 
 ```bat
 vidopt.bat doctor
-vidopt.bat dev video\corpus --encoder libx265 --cpu-workers 4
+vidopt.bat train video\corpus --encoder libsvtav1 --level 2 --cpu-workers 0 --resume
 vidopt.bat inspect
-vidopt.bat compress video\some.mp4 -o out\some_t89.mp4 --target 89 --encoder libx265 --verify
+vidopt.bat compress video\some.mp4 -o out\some_t89.mp4 --encoder libsvtav1 --level 2 --verify
 ```
 
 If something is broken: `install.bat` then `vidopt.bat doctor` — see [§13](#13-repair-damaged-or-missing-files) and **REPAIR.txt**.
@@ -745,7 +755,7 @@ If something is broken: `install.bat` then `vidopt.bat doctor` — see [§13](#1
 
 - [ ] Extract production zip; `vidopt.bat doctor` passes
 - [ ] Corpus under `video\corpus\` (content matches production)
-- [ ] `vidopt.bat dev ... --encoder libx265 --cpu-workers 4` finished; hit rate ≥ ~95%
-- [ ] `vidopt.bat compress ... --target 89 --encoder libx265 --verify` OK on a sample
+- [ ] `vidopt.bat train ... --encoder libsvtav1 --level 2 --resume` finished; hit rate ≥ ~95%
+- [ ] `vidopt.bat compress ... --level 2 --encoder libsvtav1 --verify` OK on a sample
 - [ ] Know repair path: `REPAIR.txt` / `install.bat` if files are damaged
 - [ ] Back up `models\` after training

@@ -16,6 +16,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -55,6 +56,33 @@ log = get_logger(__name__)
 # The cost is that payloads must be picklable and workers pay ~0.5 s of start-up. Both
 # are already true here: every worker takes a plain dict and rebuilds its own config.
 _MP_CONTEXT = multiprocessing.get_context("spawn")
+
+
+def _segments_manifest_path(work_dir: Path) -> Path:
+    return work_dir / "segments.json"
+
+
+def _load_segments_manifest(manifest: Path, source: Path) -> list[Segment]:
+    """Best-effort resume for already cut segments."""
+    if not manifest.is_file():
+        return []
+    try:
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    out: list[Segment] = []
+    want = source.resolve()
+    for item in raw:
+        try:
+            seg = Segment.from_dict(item)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if Path(seg.source).resolve() != want:
+            continue
+        if not Path(seg.path).is_file():
+            return []
+        out.append(seg)
+    return out
 
 
 
@@ -292,7 +320,7 @@ def plan_segments(
         log.warning(
             "this input is outside the model's training domain: %s. "
             "Predictions are extrapolations and may miss the VMAF target — verify with "
-            "--verify, and re-run `vidopt dev` on a corpus that includes content like "
+            "--verify, and re-run `vidopt train` on a corpus that includes content like "
             "this.",
             detail,
         )
@@ -309,6 +337,8 @@ def compress(
     *,
     verify: bool = False,
     keep_work: bool = False,
+    resume: bool = False,
+    progress: Callable[..., None] | None = None,
 ) -> ProductionResult:
     """Compress one video end to end."""
     started = time.monotonic()
@@ -327,20 +357,46 @@ def compress(
         source.name, info.width, info.height, info.fps, info.duration,
         info.size_bytes / 1e6,
     )
+    if progress:
+        progress(
+            "compress.start",
+            input=str(source),
+            output=str(destination),
+            encoder=config.encoder.name,
+            target=target,
+            resume=resume,
+        )
 
     work_dir = Path(config.paths.work_dir) / f"prod_{source.stem}"
     segments_dir = work_dir / "segments"
     encoded_dir = work_dir / "encoded"
     encoded_dir.mkdir(parents=True, exist_ok=True)
+    segments_manifest = _segments_manifest_path(work_dir)
+    completed = False
 
     try:
-        log.info("stage 1/4: segmenting")
-        segments = segment_video(source, segments_dir, caps, config, info=info)
+        segments: list[Segment] = []
+        if resume:
+            segments = _load_segments_manifest(segments_manifest, source)
+            if segments:
+                log.info("stage 1/4: resume reusing %d segment(s)", len(segments))
+                if progress:
+                    progress("compress.resume.segments", reused=len(segments))
+        if not segments:
+            log.info("stage 1/4: segmenting")
+            segments = segment_video(source, segments_dir, caps, config, info=info)
+        if progress:
+            progress("compress.stage.segment.done", n_segments=len(segments))
+        segments_manifest.write_text(
+            json.dumps([s.to_dict() for s in segments], indent=2), encoding="utf-8"
+        )
 
         log.info("stage 2/4: extracting features and predicting parameters")
         plans = plan_segments(
             segments, config, target, config_paths, config_overrides
         )
+        if progress:
+            progress("compress.stage.plan.done", n_segments=len(plans))
 
         log.info("stage 3/4: encoding %d segment(s)", len(plans))
         extension = container_for(config.encoder.name)
@@ -380,12 +436,33 @@ def compress(
 
         encoded: dict[int, str] = {}
         retried_segments: list[int] = []
+        if resume:
+            for payload in payloads:
+                existing = Path(payload["output_path"])
+                if existing.is_file() and existing.stat().st_size > 0:
+                    encoded[payload["index"]] = str(existing)
+            if encoded:
+                log.info(
+                    "stage 3/4: resume reusing %d pre-encoded segment(s)",
+                    len(encoded),
+                )
+                if progress:
+                    progress("compress.resume.encoded", reused=len(encoded), total=len(plans))
+            payloads = [p for p in payloads if p["index"] not in encoded]
         if workers == 1:
             for payload in payloads:
                 outcome = _encode_one(payload)
                 encoded[outcome["index"]] = outcome["output_path"]
                 if outcome.get("retried"):
                     retried_segments.append(outcome["index"])
+                if progress:
+                    progress(
+                        "compress.segment.encoded",
+                        done=len(encoded),
+                        total=len(plans),
+                        index=outcome["index"],
+                        retried=bool(outcome.get("retried")),
+                    )
         else:
             with ProcessPoolExecutor(max_workers=workers, mp_context=_MP_CONTEXT) as pool:
                 futures = {pool.submit(_encode_one, p): p for p in payloads}
@@ -400,8 +477,16 @@ def compress(
                     encoded[outcome["index"]] = outcome["output_path"]
                     if outcome.get("retried"):
                         retried_segments.append(outcome["index"])
+                    if progress:
+                        progress(
+                            "compress.segment.encoded",
+                            done=len(encoded),
+                            total=len(plans),
+                            index=outcome["index"],
+                            retried=bool(outcome.get("retried")),
+                        )
 
-        ordered = [encoded[i] for i in range(len(payloads))]
+        ordered = [encoded[i] for i in range(len(plans))]
         if retried_segments:
             log.warning(
                 "%d segment(s) needed a conservative retry: %s",
@@ -410,6 +495,8 @@ def compress(
 
         log.info("stage 4/4: concatenating")
         concat(ordered, destination, caps, audio_from=source if info.has_audio else None)
+        if progress:
+            progress("compress.stage.concat.done", total_segments=len(plans))
 
         output_bytes = destination.stat().st_size
         result = ProductionResult(
@@ -434,15 +521,37 @@ def compress(
             result.vmaf = measured.score
             result.score = breakdown.score
             result.reason = breakdown.reason
+            if progress:
+                progress(
+                    "compress.verify.done",
+                    vmaf=result.vmaf,
+                    score=result.score,
+                    met=bool(result.vmaf >= target),
+                )
 
         (work_dir / "result.json").write_text(
             json.dumps(result.to_dict(), indent=2), encoding="utf-8"
         )
+        if progress:
+            progress(
+                "compress.done",
+                output=str(destination.resolve()),
+                ratio=round(result.ratio, 4),
+                seconds=round(result.seconds, 2),
+                n_segments=result.n_segments,
+            )
+        completed = True
         return result
 
     finally:
         if not keep_work:
-            from ..media.segment import clear_dir
+            if resume and not completed:
+                log.info(
+                    "resume mode: keeping intermediates in %s after failure",
+                    work_dir,
+                )
+            else:
+                from ..media.segment import clear_dir
 
-            clear_dir(segments_dir)
-            clear_dir(encoded_dir)
+                clear_dir(segments_dir)
+                clear_dir(encoded_dir)

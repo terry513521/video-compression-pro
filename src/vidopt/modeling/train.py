@@ -1,7 +1,9 @@
 """Training.
 
-Unified mode: one bundle per encoder. Three heads: ``crf`` (regression), ``aq_mode``
-(classification), ``aq_strength`` (regression). ``vmaf_target`` is part of model input.
+Default layout: one bundle per encoder **and VMAF target** at
+``models/<encoder>/target_<T>/`` (schema v1). Three heads per bundle: ``crf`` (regression),
+``aq_mode`` (classification), ``aq_strength`` (regression). Scene features only — the
+VMAF target is fixed by the directory name.
 
 **The important design point is the CRF loss.** The objective drops to *zero* below
 ``target - 5`` (see ``scoring.py``), so the cost of prediction error is asymmetric:
@@ -41,9 +43,9 @@ from sklearn.metrics import accuracy_score, mean_absolute_error, r2_score
 
 from ..config import Config
 from ..errors import ModelError
-from ..features.extract import MODEL_FEATURE_NAMES
+from ..features.extract import FEATURE_NAMES
 from ..log import get_logger
-from .bundle import SCHEMA_VERSION, BundleMetadata, ModelBundle, bundle_dir
+from .bundle import LEGACY_SCHEMA_VERSION, BundleMetadata, ModelBundle, legacy_bundle_dir
 from .dataset import LABEL_NAMES, group_labels, to_matrices, training_targets
 
 log = get_logger(__name__)
@@ -53,9 +55,10 @@ MIN_TRAINING_ROWS = 8
 
 @dataclass
 class TrainReport:
-    """Per-encoder training outcome, suitable for printing or serialising."""
+    """Per-target training outcome, suitable for printing or serialising."""
 
     encoder: str
+    target: float
     training_targets: list[float]
     n_train: int
     n_val: int
@@ -66,9 +69,8 @@ class TrainReport:
         m = self.metrics
         hit = m.get("crf_hit_rate")
         hit_text = "n/a" if hit is None else f"{hit * 100:.0f}%"
-        targets = ",".join(f"{t:g}" for t in self.training_targets)
         return (
-            f"encoder {self.encoder}  targets [{targets}]  "
+            f"encoder {self.encoder}  target {self.target:g}  "
             f"train={self.n_train} val={self.n_val}  "
             f"crf MAE={m.get('crf_mae', float('nan')):.2f} "
             f"R2={m.get('crf_r2', float('nan')):.2f}  "
@@ -224,14 +226,14 @@ def _evaluate(
     return metrics
 
 
-def train_encoder(
+def train_encoder_target(
     rows: list[dict[str, str]],
     config: Config,
     models_root: str | Path,
+    target: float,
 ) -> TrainReport:
-    """Train and save one unified bundle for the configured encoder."""
-    targets_seen = training_targets(rows)
-    X, y, kept = to_matrices(rows, include_vmaf_target=True)
+    """Train and save one v1 bundle for the configured encoder and VMAF target."""
+    X, y, kept = to_matrices(rows, target=target, include_vmaf_target=False)
 
     if X.shape[0] < config.model.min_training_rows:
         raise ModelError(
@@ -250,10 +252,10 @@ def train_encoder(
     y_val = {name: y[name][val_idx] for name in LABEL_NAMES}
 
     log.info(
-        "encoder %s: training on %d row(s) across targets %s, validating on %d",
+        "encoder %s target %g: training on %d row(s), validating on %d",
         config.encoder.name,
+        target,
         len(train_idx),
-        [f"{t:g}" for t in targets_seen],
         len(val_idx),
     )
 
@@ -265,7 +267,7 @@ def train_encoder(
     metrics["fit_seconds"] = round(time.monotonic() - started, 2)
     metrics["crf_quantile"] = config.model.crf_quantile
     metrics["estimator"] = config.model.estimator
-    metrics["training_targets"] = targets_seen
+    metrics["training_targets"] = [target]
 
     # Refit on everything once the metrics are recorded: the held-out rows are scarce
     # and valuable, and the metrics above already describe generalisation honestly.
@@ -274,19 +276,20 @@ def train_encoder(
     }
 
     metadata = BundleMetadata(
-        schema_version=SCHEMA_VERSION,
+        schema_version=LEGACY_SCHEMA_VERSION,
         encoder=config.encoder.name,
-        feature_names=list(MODEL_FEATURE_NAMES),
+        target=target,
+        feature_names=list(FEATURE_NAMES),
         label_names=list(LABEL_NAMES),
         n_train=int(X.shape[0]),
         n_val=int(len(val_idx)),
-        training_targets=targets_seen,
+        training_targets=[target],
         metrics=metrics,
         # Recorded so production can tell when an input is outside anything the model
         # has evidence about -- see ModelBundle.out_of_domain.
         feature_ranges={
             name: [float(X[:, i].min()), float(X[:, i].max())]
-            for i, name in enumerate(MODEL_FEATURE_NAMES)
+            for i, name in enumerate(FEATURE_NAMES)
         },
         training_sources=sorted({str(g) for g in groups}),
         config={
@@ -306,12 +309,13 @@ def train_encoder(
         },
     )
 
-    directory = bundle_dir(models_root, config.encoder.name)
+    directory = legacy_bundle_dir(models_root, config.encoder.name, target)
     ModelBundle(estimators=final_estimators, metadata=metadata).save(directory)
 
     report = TrainReport(
         encoder=config.encoder.name,
-        training_targets=targets_seen,
+        target=target,
+        training_targets=[target],
         n_train=int(X.shape[0]),
         n_val=int(len(val_idx)),
         metrics=metrics,
@@ -324,5 +328,8 @@ def train_encoder(
 def train_all(
     rows: list[dict[str, str]], config: Config, models_root: str | Path
 ) -> list[TrainReport]:
-    """Train one unified bundle for the configured encoder."""
-    return [train_encoder(rows, config, models_root)]
+    """Train one v1 bundle per VMAF target present in the dataset."""
+    reports: list[TrainReport] = []
+    for target in training_targets(rows):
+        reports.append(train_encoder_target(rows, config, models_root, target))
+    return reports
